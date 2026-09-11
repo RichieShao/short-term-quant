@@ -1,0 +1,28 @@
+{
+  "name": "quant-mobile",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host",
+    "build": "vite build",
+    "preview": "vite preview --host"
+  },
+  "dependencies": {
+    "@cloudbase/js-sdk": "^2.7.0",
+    "pinia": "^2.1.7",
+    "vue": "^3.4.21"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.0",
+    "jsdom": "^29.1.1",
+    "vite": "^7.0.0"
+  },
+  "optionalDependencies": {
+    "@esbuild/openharmony-arm64": "0.25.12",
+    "esbuild": "0.25.12"
+  },
+  "engines": {
+    "node": ">=20.19"
+  }
+}

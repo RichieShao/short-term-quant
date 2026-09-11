@@ -1,0 +1,32 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ===== Node =====
+node_modules/
+npm-debug.log*
+yarn-error.log*
+.pnpm-store/
+
+# ===== 构建产物 / 静态镜像（可随时重建，不入库）=====
+web/dist/
+web/quant-backup/
+cloud-mirror/
+
+# ===== 工作区私有数据：记忆、临时脚本、参考原文抽取 ====
+.workbuddy/
+
+# ===== 探针临时输出 / 日志 =====
+u_day.json
+u_hist.json
+u_latest.json
+u_stock.json
+*.log
+.tmp_*
+
+# ===== 系统 =====
+.DS_Store
+Thumbs.db

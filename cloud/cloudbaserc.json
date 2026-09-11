@@ -1,0 +1,96 @@
+{
+  "version": "2.0",
+  "envId": "richieshao-1980-d9f5588r8f7850a1",
+  "region": "ap-shanghai",
+  "framework": {
+    "name": "quant-cloud"
+  },
+  "functions": [
+    {
+      "name": "probe",
+      "runtime": "Python3.7",
+      "handler": "index.main",
+      "timeout": 60,
+      "memorySize": 256,
+      "installDependency": false,
+      "ignore": [
+        "*.md",
+        "__pycache__/**",
+        ".workbuddy/**"
+      ]
+    },
+    {
+      "name": "snapshot_py",
+      "runtime": "Python3.7",
+      "handler": "index.main",
+      "timeout": 60,
+      "memorySize": 512,
+      "installDependency": false,
+      "ignore": [
+        "*.md",
+        "__pycache__/**",
+        ".workbuddy/**"
+      ]
+    },
+    {
+      "name": "daily_job",
+      "runtime": "Nodejs14.18",
+      "handler": "index.main",
+      "timeout": 60,
+      "memorySize": 256,
+      "installDependency": true,
+      "ignore": [
+        "node_modules/**",
+        "*.md"
+      ],
+      "triggers": [
+        {
+          "name": "daily_1605",
+          "type": "timer",
+          "config": "0 5 16 * * MON-FRI *"
+        },
+        {
+          "name": "daily_1640",
+          "type": "timer",
+          "config": "0 40 16 * * MON-FRI *"
+        }
+      ]
+    },
+    {
+      "name": "seed_calib",
+      "runtime": "Nodejs14.18",
+      "handler": "index.main",
+      "timeout": 60,
+      "memorySize": 256,
+      "installDependency": true,
+      "ignore": [
+        "node_modules/**",
+        "*.md"
+      ]
+    },
+    {
+      "name": "seed_coretrack",
+      "runtime": "Nodejs14.18",
+      "handler": "index.main",
+      "timeout": 60,
+      "memorySize": 256,
+      "installDependency": true,
+      "ignore": [
+        "node_modules/**",
+        "*.md"
+      ]
+    },
+    {
+      "name": "api",
+      "runtime": "Nodejs14.18",
+      "handler": "index.main",
+      "timeout": 60,
+      "memorySize": 256,
+      "installDependency": true,
+      "ignore": [
+        "node_modules/**",
+        "*.md"
+      ]
+    }
+  ]
+}

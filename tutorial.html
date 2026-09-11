@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>个人短线量化系统 · 使用教程</title>
+<style>
+:root{
+  --bg:#0b1020; --bg2:#111832; --card:rgba(255,255,255,.055); --card2:rgba(255,255,255,.09);
+  --line:rgba(255,255,255,.1); --tx:#e8ecf6; --tx2:#9aa6c0; --tx3:#6b7690;
+  --up:#ff5d5d; --down:#3ddc84; --gold:#f5c66b; --orange:#ff9f43; --blue:#6ea8ff; --purple:#b48cff;
+  --r:16px; --safe:env(safe-area-inset-bottom,0px);
+}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html{scroll-behavior:smooth}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","HarmonyOS Sans SC","Microsoft YaHei",sans-serif;
+  background:
+    radial-gradient(1000px 500px at 85% -10%,rgba(110,168,255,.14),transparent 60%),
+    radial-gradient(800px 500px at -10% 30%,rgba(180,140,255,.1),transparent 55%),
+    radial-gradient(700px 500px at 60% 110%,rgba(245,198,107,.08),transparent 55%),
+    var(--bg);
+  color:var(--tx); line-height:1.75; font-size:15px; padding:0 0 calc(40px + var(--safe));
+}
+.wrap{max-width:860px;margin:0 auto;padding:0 16px}
+/* ---------- hero ---------- */
+.hero{padding:44px 0 26px;text-align:center}
+.hero .logo{display:inline-flex;align-items:center;gap:10px;padding:8px 18px;border-radius:999px;
+  background:var(--card);border:1px solid var(--line);backdrop-filter:blur(14px);
+  color:var(--gold);font-size:13px;letter-spacing:2px}
+.hero h1{font-size:clamp(24px,5.5vw,34px);margin:18px 0 10px;font-weight:700;letter-spacing:1px}
+.hero h1 em{font-style:normal;background:linear-gradient(90deg,var(--gold),var(--orange),var(--up));
+  -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+.hero p.sub{color:var(--tx2);font-size:14px;max-width:620px;margin:0 auto}
+.formula{margin:22px auto 0;max-width:640px;padding:16px 18px;border-radius:var(--r);
+  background:linear-gradient(135deg,rgba(245,198,107,.12),rgba(255,95,93,.08));
+  border:1px solid rgba(245,198,107,.25);backdrop-filter:blur(14px);font-size:15px;text-align:center}
+.formula b{color:var(--gold)}
+.formula .fx{display:block;font-size:17px;margin-top:6px;font-weight:700;letter-spacing:.5px}
+.urlchip{display:inline-block;margin-top:14px;padding:7px 16px;border-radius:10px;font-size:12.5px;
+  background:var(--card);border:1px solid var(--line);color:var(--blue);word-break:break-all}
+/* ---------- nav ---------- */
+.nav{position:sticky;top:0;z-index:50;margin:10px -16px 0;padding:10px 16px;
+  background:rgba(11,16,32,.82);backdrop-filter:blur(18px);border-bottom:1px solid var(--line);
+  display:flex;gap:8px;overflow-x:auto;scrollbar-width:none}
+.nav::-webkit-scrollbar{display:none}
+.nav a{flex:0 0 auto;padding:6px 14px;border-radius:999px;font-size:13px;color:var(--tx2);
+  text-decoration:none;background:var(--card);border:1px solid var(--line);transition:.2s}
+.nav a.on,.nav a:active{color:var(--gold);border-color:rgba(245,198,107,.4)}
+/* ---------- sections ---------- */
+section{padding:30px 0 6px}
+h2.sec{display:flex;align-items:center;gap:10px;font-size:20px;font-weight:700;margin-bottom:6px}
+h2.sec .no{flex:0 0 auto;width:30px;height:30px;border-radius:9px;display:flex;align-items:center;justify-content:center;
+  font-size:14px;font-weight:800;background:linear-gradient(135deg,var(--gold),var(--orange));color:#1a1300}
+p.lead{color:var(--tx2);font-size:13.5px;margin-bottom:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);
+  padding:16px 18px;margin-bottom:14px;backdrop-filter:blur(14px)}
+.card.hl{background:linear-gradient(135deg,rgba(255,95,93,.09),var(--card));border-color:rgba(255,95,93,.25)}
+.card.gd{background:linear-gradient(135deg,rgba(245,198,107,.1),var(--card));border-color:rgba(245,198,107,.28)}
+h3.cs{font-size:15.5px;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+h3.cs::before{content:"";width:4px;height:16px;border-radius:2px;background:linear-gradient(180deg,var(--gold),var(--orange))}
+table{width:100%;border-collapse:collapse;font-size:13px;margin:10px 0}
+th,td{padding:8px 9px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--gold);font-weight:600;white-space:nowrap;background:rgba(255,255,255,.03)}
+tr:last-child td{border-bottom:none}
+.txs{overflow-x:auto;margin:0 -6px;padding:0 6px}
+.txs table{min-width:560px}
+ul.dots{list-style:none;padding-left:0}
+ul.dots li{padding-left:20px;position:relative;margin:7px 0;color:var(--tx);font-size:13.5px}
+ul.dots li::before{content:"";position:absolute;left:2px;top:9px;width:7px;height:7px;border-radius:50%;
+  background:linear-gradient(135deg,var(--gold),var(--orange))}
+ul.dots li b{color:var(--gold)}
+ul.dots.red li::before{background:var(--up)} ul.dots.blue li::before{background:var(--blue)}
+.tag{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11.5px;font-weight:600;
+  border:1px solid var(--line);background:var(--card2);white-space:nowrap}
+.t-up{color:var(--up);border-color:rgba(255,95,93,.35);background:rgba(255,95,93,.1)}
+.t-dn{color:var(--down);border-color:rgba(61,220,132,.35);background:rgba(61,220,132,.1)}
+.t-gd{color:var(--gold);border-color:rgba(245,198,107,.35);background:rgba(245,198,107,.1)}
+.t-bl{color:var(--blue);border-color:rgba(110,168,255,.35);background:rgba(110,168,255,.1)}
+.t-pu{color:var(--purple);border-color:rgba(180,140,255,.35);background:rgba(180,140,255,.1)}
+/* ---------- 流程步骤 ---------- */
+.steps{display:flex;flex-direction:column;gap:10px}
+.step{display:flex;gap:14px;background:var(--card);border:1px solid var(--line);border-radius:var(--r);
+  padding:14px 16px;backdrop-filter:blur(14px)}
+.step .n{flex:0 0 auto;width:34px;height:34px;border-radius:11px;display:flex;align-items:center;justify-content:center;
+  font-weight:800;font-size:15px;color:#10182f;background:linear-gradient(135deg,var(--gold),var(--orange))}
+.step h4{font-size:14.5px;font-weight:700;margin-bottom:3px}
+.step p{font-size:13px;color:var(--tx2)}
+.step p b{color:var(--tx)}
+/* ---------- 温度条 ---------- */
+.heatbar{margin:14px 0 6px}
+.hb-track{display:flex;height:38px;border-radius:12px;overflow:hidden;border:1px solid var(--line);font-size:11.5px;font-weight:700}
+.hb-track div{display:flex;align-items:center;justify-content:center;color:#0e1526}
+.hb1{flex:33;background:linear-gradient(180deg,#8fa7ff,#6e8fe8)}
+.hb2{flex:12;background:linear-gradient(180deg,#a9e8c5,#63d9a0)}
+.hb3{flex:13;background:linear-gradient(180deg,#ffe29a,#f2c869)}
+.hb4{flex:14;background:linear-gradient(180deg,#ffb27a,#ff9552)}
+.hb5{flex:28;background:linear-gradient(180deg,#ff8d8d,#ff5d5d)}
+.hb-scale{display:flex;justify-content:space-between;font-size:11px;color:var(--tx3);margin-top:5px;padding:0 2px}
+/* ---------- 动作矩阵 ---------- */
+.matrix{display:grid;grid-template-columns:76px repeat(3,1fr);gap:6px;font-size:12.5px}
+.mx-h{padding:8px 6px;text-align:center;font-weight:700;border-radius:10px;background:var(--card2)}
+.mx-c{padding:9px 8px;border-radius:10px;background:var(--card);border:1px solid var(--line)}
+.mx-c .v{font-weight:700;display:block;margin-bottom:2px}
+.mx-c .p{font-size:11.5px;color:var(--tx2)}
+.mx-stage{display:flex;align-items:center;justify-content:center;font-weight:700;border-radius:10px;color:#101628}
+/* ---------- tab 卡 ---------- */
+.tabs5{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px}
+.tabcard{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:14px;backdrop-filter:blur(14px)}
+.tabcard .ic{font-size:22px;margin-bottom:6px}
+.tabcard h4{font-size:14px;font-weight:700;margin-bottom:4px;color:var(--gold)}
+.tabcard p{font-size:12px;color:var(--tx2)}
+/* ---------- 胜率要点 ---------- */
+.win{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
+.wcard{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:16px;backdrop-filter:blur(14px)}
+.wcard .k{display:inline-block;font-size:11px;font-weight:700;padding:3px 10px;border-radius:999px;margin-bottom:8px}
+.wcard h4{font-size:14.5px;font-weight:700;margin-bottom:6px}
+.wcard p{font-size:12.5px;color:var(--tx2)}
+.wcard p b{color:var(--gold)}
+.k-red{background:rgba(255,95,93,.15);color:var(--up)} .k-gold{background:rgba(245,198,107,.15);color:var(--gold)}
+.k-blue{background:rgba(110,168,255,.15);color:var(--blue)} .k-green{background:rgba(61,220,132,.15);color:var(--down)}
+/* ---------- checklist ---------- */
+.check{list-style:none}
+.check li{display:flex;gap:10px;align-items:flex-start;padding:9px 0;border-bottom:1px dashed var(--line);font-size:13.5px}
+.check li:last-child{border-bottom:none}
+.box{flex:0 0 auto;width:19px;height:19px;border-radius:6px;border:1.5px solid var(--gold);margin-top:3px;position:relative}
+/* ---------- 边界/免责 ---------- */
+.warn{border-left:3px solid var(--orange);padding:10px 14px;border-radius:0 12px 12px 0;
+  background:rgba(255,159,67,.08);font-size:13px;color:var(--tx2);margin:10px 0}
+.warn b{color:var(--orange)}
+footer{text-align:center;color:var(--tx3);font-size:12px;padding:30px 16px 0}
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace}
+.up{color:var(--up)} .dn{color:var(--down)} .gold{color:var(--gold)} .blue{color:var(--blue)}
+@media (max-width:520px){
+  body{font-size:14.5px}
+  .matrix{grid-template-columns:64px repeat(3,1fr);font-size:11.5px}
+  .card{padding:14px 14px}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="hero">
+  <div class="logo">短线量化 · 舒九框架蒸馏</div>
+  <h1>个人短线量化系统<em>使用教程</em></h1>
+  <p class="sub">不预测，只识别状态并映射动作 —— 教你把这套系统用成纪律，而不是用成信号源。</p>
+  <div class="formula">
+    <b>核心公式</b>
+    <span class="fx">收益 = 核心识别 × 周期定位 × 仓位管理 × 监管风控</span>
+  </div>
+  <div class="urlchip mono">https://richieshao-1980-d9f5588r8f7850a1-1450128794.tcloudbaseapp.com/quant/</div>
+</div>
+
+<div class="nav" id="nav">
+  <a href="#s1" class="on">① 系统是什么</a>
+  <a href="#s2">② 每日流程</a>
+  <a href="#s3">③ 五个页面</a>
+  <a href="#s4">④ 读懂数字</a>
+  <a href="#s5">⑤ 动作矩阵</a>
+  <a href="#s6">⑥ 提高胜率</a>
+  <a href="#s7">⑦ 一日清单</a>
+  <a href="#s8">⑧ 能力边界</a>
+</div>
+
+<!-- ================= ① ================= -->
+<section id="s1">
+  <h2 class="sec"><span class="no">1</span>系统是什么</h2>
+  <p class="lead">先纠正一个使用姿势：这套系统<b>不预测明天涨跌</b>，它做的是把盘面压缩成三件事——现在是什么周期、谁是核心、该配多少仓位。胜率来自"只在正确的阶段做正确的事"。</p>
+  <div class="card gd">
+    <h3 class="cs">三层结构，一层决策</h3>
+    <div class="txs"><table>
+      <tr><th>层</th><th>回答什么</th><th>落地页面</th></tr>
+      <tr><td><b>指标层</b></td><td>情绪多热？谁分最高？离监管线多远？</td><td>今日盘面 · 核心池 · 异动体检</td></tr>
+      <tr><td><b>状态层</b></td><td>启动 / 发酵 / 高潮 / 震荡 / 退潮，现在在哪一站？</td><td>今日盘面（CycleBar）</td></tr>
+      <tr><td><b>决策层</b></td><td>周期 × 评分 → 动作 + 仓位上限 + 硬约束</td><td>核心池（每只高标的动作）</td></tr>
+    </table></div>
+  </div>
+  <div class="card">
+    <h3 class="cs">数据怎么来的（决定你能信几分）</h3>
+    <ul class="dots">
+      <li>交易日 <b>16:05</b> 云端定时任务自动算快照（16:40 幂等兜底重跑一遍），非交易日不更新——所以周末看到的是周五数据，这是正常的。</li>
+      <li>温度/周期基于<b>同花顺涨停池</b>近一年（约 259 个交易日）回放校准的刻度，不是拍脑袋阈值。</li>
+      <li>核心评分是<b>代理口径</b>：带动性用行业涨停家数近似、人气用连板高度位次近似，逻辑强度缺省 4/10 等<b>你人工确认</b>——这既是边界，也是你提高胜率的抓手（见第⑥节）。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= ② ================= -->
+<section id="s2">
+  <h2 class="sec"><span class="no">2</span>每日使用流程</h2>
+  <p class="lead">收盘后 16:05 打开，5 分钟走完。盘中不建议看——这套是<b>盘后定调、次日执行</b>的系统。</p>
+  <div class="steps">
+    <div class="step"><div class="n">1</div><div><h4>今日盘面 → 确定周期阶段</h4><p>看温度计读数和周期定位条，先问一个问题：<b>现在是哪个阶段？</b>这一步决定今天 80% 的动作。</p></div></div>
+    <div class="step"><div class="n">2</div><div><h4>核心池 → 看有没有 S/A 级标的</h4><p>按评分排序，只关注 <b>S（≥80）和 A（60–79）</b>。B/C 级无论多好看，默认不碰——它们是 A 杀高发区。</p></div></div>
+    <div class="step"><div class="n">3</div><div><h4>逐票核对动作与硬约束</h4><p>每只高标都带"动作 + 仓位上限 + 风险标注"。特别盯两类：<b>禁接力</b>（伪核心/中位一字）和<b>异动高危</b>（距严重异动线余量 &lt;15% → 尾盘兑现）。</p></div></div>
+    <div class="step"><div class="n">4</div><div><h4>异动体检 → 查候选与持仓</h4><p>输入代码看 3/10/30 日偏离值和 headroom（安全余量）。余量 &lt;15% 的持仓，<b>当天尾盘就该先手减</b>，不等触发。</p></div></div>
+    <div class="step"><div class="n">5</div><div><h4>回测复盘 → 每周校准一次预期</h4><p>看阶段分布和自评命中率，理解系统当下刻度是否贴合市场生态。命中率 5–7 个交易日才动 1 个单位，不是坏掉了。</p></div></div>
+    <div class="step"><div class="n">6</div><div><h4>次日盘中 → 只执行，不发明</h4><p>按盘后定的清单执行。周期没变、评分没破线，就不管分时波动加戏——<b>纪律本身就是优势</b>。</p></div></div>
+  </div>
+</section>
+
+<!-- ================= ③ ================= -->
+<section id="s3">
+  <h2 class="sec"><span class="no">3</span>五个页面怎么用</h2>
+  <div class="tabs5">
+    <div class="tabcard"><div class="ic">🌡️</div><h4>今日盘面</h4><p>三指数 + 温度计表盘 + 6 日温度走势 + 周期定位 + 连板天梯 + 今日纪律。<b>每天第一站。</b></p></div>
+    <div class="tabcard"><div class="ic">🏆</div><h4>核心池</h4><p>高标评分卡（0–100 → S/A/B/C），展开看异动体检和风险扣分明细。<b>决策主战场。</b></p></div>
+    <div class="tabcard"><div class="ic">🔥</div><h4>题材榜</h4><p>当日涨停题材分布。看<b>哪个板块在聚集跟随者</b>——后排厚度是持续性的燃料。</p></div>
+    <div class="tabcard"><div class="ic">⚖️</div><h4>异动体检</h4><p>任意代码 3/10/30 日偏离 + 严重异动余量 + 风险标签。<b>监管风控的前哨。</b></p></div>
+    <div class="tabcard"><div class="ic">📐</div><h4>回测复盘</h4><p>刻度校准样本窗口、转折点自评命中率、周期阶段分布。<b>了解系统，不直接产生交易。</b></p></div>
+  </div>
+  <div class="card">
+    <h3 class="cs">核心池评分卡读法</h3>
+    <div class="txs"><table>
+      <tr><th>等级</th><th>分数</th><th>含义</th><th>默认态度</th></tr>
+      <tr><td><span class="tag t-gd">S</span></td><td>≥80</td><td>总龙候选：带动性 + 持续性 + 无重大扣分</td><td class="up">唯一可重点参与</td></tr>
+      <tr><td><span class="tag t-bl">A</span></td><td>60–79</td><td>分支核心 / 待确认总龙</td><td>看周期给仓位</td></tr>
+      <tr><td><span class="tag t-pu">B</span></td><td>45–59</td><td>地位不足或逻辑偏弱</td><td class="dn">默认不做</td></tr>
+      <tr><td><span class="tag t-up">C</span></td><td>&lt;45</td><td>伪核心 / 一字断层 / 走弱</td><td class="dn">禁接力</td></tr>
+    </table></div>
+    <p style="font-size:12.5px;color:var(--tx2)">扣分项看得到：一字断层 −10、伪核心一字 −15、连续低开不创新高 −10、触发严重异动 −10……评分是<b>显式可解释</b>的，别只看总分。</p>
+  </div>
+</section>
+
+<!-- ================= ④ ================= -->
+<section id="s4">
+  <h2 class="sec"><span class="no">4</span>读懂关键数字（P4 校准刻度）</h2>
+  <p class="lead">这些阈值不是玄学，是用 2025-08 ~ 2026-09 全年涨停池回放、按分位数（≈p88/p70/p45/p15）校准出来的。</p>
+  <div class="card">
+    <h3 class="cs">情绪温度计：0–100 分五档</h3>
+    <div class="heatbar">
+      <div class="hb-track">
+        <div class="hb1">冰点</div><div class="hb2">偏冷</div><div class="hb3">温和</div><div class="hb4">活跃</div><div class="hb5">亢奋</div>
+      </div>
+      <div class="hb-scale"><span>0</span><span>33</span><span>45</span><span>58</span><span>72</span><span>100</span></div>
+    </div>
+    <ul class="dots blue" style="margin-top:10px">
+      <li>温度由四组指标合成：涨停家数（满刻度 <b>100 家</b>）、最高连板（满刻度 <b>13 板</b>）、连板家数（满刻度 <b>28 家</b>），再叠加炸板率 / 隔日溢价 / 跌停惩罚。</li>
+      <li>刻度是"新市场生态"校准的（涨停常 80–150 家、高板常 10+），<b>别拿旧经验里的"70 家涨停 = 极热"来套</b>——现在 70 家只是中位偏上。</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3 class="cs">周期定位线</h3>
+    <div class="txs"><table>
+      <tr><th>阶段</th><th>触发条件（简版）</th><th>核心特征</th></tr>
+      <tr><td><span class="tag t-dn">启动</span></td><td>温度 ≥48 且回升，高度 2 板起步</td><td>冰点后首个反包 / 首板批量 —— <b>下一轮核心在此时诞生</b></td></tr>
+      <tr><td><span class="tag t-bl">发酵</span></td><td>温度 ≥56、炸板率 &lt;35%、趋势非回落</td><td>题材扩散，分支核心轮动，分歧低吸</td></tr>
+      <tr><td><span class="tag t-up">高潮</span></td><td>温度 ≥66，或高度 ≥11 板且涨停拥挤</td><td><b>加速 = 买盘枯竭前夜</b>，只持有不加仓</td></tr>
+      <tr><td><span class="tag t-pu">震荡</span></td><td>温度中位、赚钱效应钝化（炸板高 / 溢价弱）</td><td>高抛低吸，禁止追涨杀跌</td></tr>
+      <tr><td><span class="tag t-dn">退潮</span></td><td>温度 &lt;33，或跌停 ≥15 家 + 溢价转负</td><td>空仓为主，只等冰点反转信号</td></tr>
+    </table></div>
+    <p style="font-size:12.5px;color:var(--tx2)">特别规则：<b>高潮后单日骤降 ≥12 分 → 自动进入"震荡（退潮预警）"</b>，系统会提示防 A 杀。这是 08-28 那类顶部最实用的保护。</p>
+  </div>
+</section>
+
+<!-- ================= ⑤ ================= -->
+<section id="s5">
+  <h2 class="sec"><span class="no">5</span>动作矩阵：系统的心脏</h2>
+  <p class="lead">仓位 = f(周期阶段, 核心评分)。这张表系统每天替你查，但你必须背下来——盘中没有系统时，它就是你的纪律。</p>
+  <div class="card">
+    <div class="matrix">
+      <div class="mx-h" style="background:transparent"></div>
+      <div class="mx-h" style="color:var(--gold)">S ≥80</div>
+      <div class="mx-h" style="color:var(--blue)">A 60–79</div>
+      <div class="mx-h" style="color:var(--purple)">B/C &lt;60</div>
+
+      <div class="mx-stage" style="background:#63d9a0">启动</div>
+      <div class="mx-c"><span class="v up">试仓新核心</span><span class="p">20–30%，冰点反包，错则次日走</span></div>
+      <div class="mx-c"><span class="v">观察候选</span><span class="p">≤10%，轻仓跟踪等发酵</span></div>
+      <div class="mx-c"><span class="v dn">空仓</span><span class="p">地位不足不参与</span></div>
+
+      <div class="mx-stage" style="background:#f2c869">发酵</div>
+      <div class="mx-c"><span class="v up">主攻·顺势做多</span><span class="p">40–60%，分时低吸不追高</span></div>
+      <div class="mx-c"><span class="v">分支核心可做</span><span class="p">20–30%，逻辑独立才参与</span></div>
+      <div class="mx-c"><span class="v dn">禁接力</span><span class="p">中位/补涨最易 A 杀</span></div>
+
+      <div class="mx-stage" style="background:#ff9552">高潮</div>
+      <div class="mx-c"><span class="v">持有不加</span><span class="p">只做总龙；异动余量&lt;15% 先手出</span></div>
+      <div class="mx-c"><span class="v gold">兑现为主</span><span class="p">中位跟风坚决不追</span></div>
+      <div class="mx-c"><span class="v dn">空</span><span class="p">高潮期接中位 = 接刀</span></div>
+
+      <div class="mx-stage" style="background:#b48cff">震荡</div>
+      <div class="mx-c"><span class="v">高抛低吸</span><span class="p">≤30%，大涨卖跳水吸</span></div>
+      <div class="mx-c"><span class="v">核心低吸不加</span><span class="p">≤15%</span></div>
+      <div class="mx-c"><span class="v dn">空</span><span class="p">等方向选择</span></div>
+
+      <div class="mx-stage" style="background:#8fa7ff;color:#fff">退潮</div>
+      <div class="mx-c"><span class="v">冰点反包试错</span><span class="p">≤10%，极小仓</span></div>
+      <div class="mx-c"><span class="v dn">空仓等待</span><span class="p">不做接力</span></div>
+      <div class="mx-c"><span class="v dn">空仓</span><span class="p">等冰点反转信号</span></div>
+    </div>
+  </div>
+  <div class="card hl">
+    <h3 class="cs">三条硬约束（优先级高于矩阵）</h3>
+    <ul class="dots red">
+      <li><b>监管温度 ≤ −2</b>（抓人 / 封账户级事件）→ 全线降半仓以下，高位核心只出不进。</li>
+      <li><b>持仓进入严重异动高危区</b>（余量 &lt;15%）→ 尾盘兑现策略启动，不等到触发。</li>
+      <li><b>中位股 / 补涨股永远禁止接力</b> —— 无论周期多好，这一条没有例外。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= ⑥ ================= -->
+<section id="s6">
+  <h2 class="sec"><span class="no">6</span>怎么用，胜率更高</h2>
+  <p class="lead">系统的胜率来自两个乘法：选对阶段 × 只做高评分。以下是六个经过回测与实战提炼的用法要点。</p>
+  <div class="win">
+    <div class="wcard"><span class="k k-red">要点 1</span><h4>周期错配，一票不做</h4><p>全年的钱基本是<b>发酵期赚的</b>。震荡期能做但只高抛低吸核心；<b>退潮期最强信号就是"没有信号"</b>——空仓也是仓位。看阶段分布就知道：全年 259 日里退潮仅 2 天、震荡 126 天，大部分时间系统其实在告诉你"少动"。</p></div>
+    <div class="wcard"><span class="k k-gold">要点 2</span><h4>只买 S 级总龙，A 级看周期</h4><p>评分 ≥80 且地位最高的那只才配重仓。A 级只在发酵期做分支逻辑；B/C 级无论故事多好听，<b>16 分的"伪核心一字"就是大面源泉的实锤样本</b>。宁可错过，不降档凑数。</p></div>
+    <div class="wcard"><span class="k k-blue">要点 3</span><h4>用好"需人工确认"清单</h4><p>这是<b>你比系统强的地方</b>：逻辑强度缺省按 4/10 计（纯情绪），若你人工确认题材是业绩级/政策级，上调到 8 后 A/B 级候选可能直升 S/A——系统已经把预估分算好放在观察清单里。机器管分时以外的，你管题材真伪。</p></div>
+    <div class="wcard"><span class="k k-green">要点 4</span><h4>异动余量当"卖点钟"用</h4><p>headroom_10d &lt;15% = 尾盘先手兑现，别赌"绕过去"。历史上绕异动成功固然次日高溢价，但<b>集体抢跑触发监管就是板块级退潮</b>。用体检页每天扫一遍持仓，把余量当倒计时。</p></div>
+    <div class="wcard"><span class="k k-red">要点 5</span><h4>高潮日做减法，启动日做加法</h4><p>高潮期的正确动作是<b>持有不加 + 逐步兑现</b>（加速=买盘枯竭前夜）；真正的机会在启动期的<b>冰点反包</b>——亏钱效应衰竭 + 溢价转正 + 首板批量出现后的第一个反包核心，往往是下一轮总龙。情绪周期里，底部敢试比顶部敢拿更值钱。</p></div>
+    <div class="wcard"><span class="k k-gold">要点 6</span><h4>卖点交给规则，不交给感觉</h4><p>持仓跌破 60 分 → 减半（R2）；震荡期利好高开 → 直接兑现（R6）；总龙封板但跟风冲高回落 → 次日冲高出（R7）；上一核心 A 杀 → 下一核心大概率也 A 杀（R9）。<b>卖点规则的价值不在单次对错，在于杜绝"多拿一天"的致命伤。</b></p></div>
+  </div>
+  <div class="warn"><b>关于"自评命中率"的正确理解：</b>复盘页的 68% / 100% / 87% 是<b>同源重放的自洽性检查</b>（规则在历史数据上是否自圆其说），不是未来胜率。顶点需其后 3 个交易日走完才确认，所以该数字每 5–7 个交易日才动 1 个单位——把它当系统体检指标，别当胜率承诺。</div>
+</section>
+
+<!-- ================= ⑦ ================= -->
+<section id="s7">
+  <h2 class="sec"><span class="no">7</span>一日决策清单（打印版）</h2>
+  <p class="lead">每天收盘后照着勾，勾完就是明天的剧本。</p>
+  <div class="card">
+    <ul class="check">
+      <li><span class="box"></span><span>今日周期阶段是 ______；若是<b>退潮/高潮后骤降</b> → 明日默认空仓或只留总龙，勾掉一切买入冲动。</span></li>
+      <li><span class="box"></span><span>核心池有没有 <b>S 级</b>？有 → 名字 ______，按矩阵给仓位；没有 → 明日无新增买入计划。</span></li>
+      <li><span class="box"></span><span>候选/持仓逐只过<b>异动体检</b>：余量 &lt;15% 的 → 明日尾盘（或当日）先手兑现。</span></li>
+      <li><span class="box"></span><span>有没有 <b>禁接力</b> 标签的中位/一字股在自选里诱惑我？→ 有，删自选，物理隔离。</span></li>
+      <li><span class="box"></span><span>"需人工确认"清单里，有没有我能拍板的<b>业绩/政策级题材</b>？→ 确认后重估等级再进决策。</span></li>
+      <li><span class="box"></span><span>持仓有无跌破 60 分 / 连续低开不创新高？→ 触发 R2，减半，不商量。</span></li>
+      <li><span class="box"></span><span>监管面：有无停牌 / 限制买入 / 问询级事件？→ 有则全线降档执行。</span></li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= ⑧ ================= -->
+<section id="s8">
+  <h2 class="sec"><span class="no">8</span>能力边界（诚实声明）</h2>
+  <div class="card">
+    <ul class="dots blue">
+      <li><b>评分卡是代理口径</b>：带动性 ← 行业涨停家数、人气 ← 连板高度位次、被动性 ← 炸板次数。分时级联动 / 龙虎榜数据不可得，标注为近似的部分需你复核。</li>
+      <li><b>监管事件靠人工输入</b>：小黑屋、封账户等无稳定数据源，系统默认 reg_temp=0，重大监管新闻要自己代入降档。</li>
+      <li><b>周期判定是启发式</b>：阈值虽经一年回放校准，但市场生态会漂移（刻度 2026-09 刚从旧饱和刻度换过来）。若发现连续多日"高潮"或长时间零"退潮"，应怀疑刻度过期，重新校准。</li>
+      <li><b>本系统不构成投资建议</b>：全部输出仅为个人研究用途的规则化复盘工具，仓位区间是纪律参考而非收益承诺。短线投机风险极高，盈亏自负。</li>
+    </ul>
+  </div>
+</section>
+
+<footer>
+  个人短线量化系统 · 教程 v1.0 · 2026-09-09<br>
+  基于舒九《个人关于投机的理解与做法》方法论蒸馏 · 仅供个人研究，非投资建议
+</footer>
+</div>
+<script>
+const nav=document.getElementById('nav'),links=[...nav.querySelectorAll('a')];
+const secs=links.map(a=>document.querySelector(a.getAttribute('href')));
+const io=new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){
+  const i=secs.indexOf(e.target);links.forEach((l,j)=>l.classList.toggle('on',i===j));}})},
+  {rootMargin:'-20% 0px -70% 0px'});
+secs.forEach(s=>s&&io.observe(s));
+</script>
+</body>
+</html>
