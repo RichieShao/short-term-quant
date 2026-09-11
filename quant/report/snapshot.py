@@ -17,6 +17,7 @@ import sys
 
 from quant.data.kline import benchmark_index, fetch_daily, fetch_realtime, normalize_code, prev_trade_date
 from quant.data.pools import fetch_dt_pool, fetch_zb_pool, fetch_zt_pool
+from quant.data.universe import build_pattern_pool
 from quant.indicators.abnormal import compute_deviation
 from quant.indicators.core_score import score_core
 from quant.indicators.ma_pattern import scan_pattern
@@ -492,7 +493,10 @@ def build_snapshot(date: str | None = None, with_cores: bool = True,
         snap.setdefault("errors", []).append(f"实验室(Lab)失败: {e}")
         snap["lab"] = None
 
-    # 双线粘合突破（MA7/MA21）：候选池同 Lab（当日涨停 ∪ 核心池）。
+    # 双线粘合突破（MA7/MA21）：候选池 = **当日涨停 ∪ 核心池 ∪ 全市场异动池**。
+    # ⚠ 2026-09-11 P1 修复：原先只有"涨停 ∪ 核心"，而核心池 ⊆ 涨停池 ⇒ ∪ 是空操作，
+    #   所有"突破"必然是当日涨停股，形态退化成"涨停股二次筛选器"。现补入异动池
+    #   （东财全市场的"上涨 + 放量/活跃 + 未涨停"），才能**在涨停之前**发现突破。
     # 仅"快照日==全局最新交易日"时扫描——历史/补跑跳过（K线形态只对最新日有决策意义）。
     # 资金流（当日东财明细 + 自累积多日趋势）与龙虎榜（当日 T + 前一交易日 T-1）一并挂载：
     # 两者只加字段、不参与突破判定；当日榜约 18:00 后发布，16:05/16:40 时 lhb 必为空，
@@ -504,20 +508,12 @@ def build_snapshot(date: str | None = None, with_cores: bool = True,
             is_latest = bool(_gl and today == _gl[-1])
         pat = None
         if is_latest:
-            _cmap: dict[str, dict] = {}
-            for x in zt_today:
-                c = normalize_code(x.get("code", ""))
-                _cmap[c] = {"code": c, "name": x.get("name", ""),
-                            "board": int(x.get("board_cnt") or 1), "in_core": False}
-            for c0 in cores or []:
-                c = normalize_code(c0.get("code", ""))
-                if c in _cmap:
-                    _cmap[c]["in_core"] = True
-                else:
-                    _cmap[c] = {"code": c, "name": c0.get("name", ""),
-                                "board": int(c0.get("board") or 1), "in_core": True}
-            pat = scan_pattern(list(_cmap.values()), date=today, flow_agg=flow_agg)
-            pat["date"] = today
+            _items, _pmeta = build_pattern_pool(zt_rows=zt_today, core_rows=cores)
+            pat = scan_pattern(_items, date=today, flow_agg=flow_agg, pool_meta=_pmeta)
+            # 不再把 pat["date"] 覆写成 today：scan_pattern 已回传真实 bar 日期与
+            # latest_bar / fresh / stale_n，覆写会掩盖"K线未更新"这一事实（P3）。
+            if not pat.get("date"):
+                pat["date"] = today
         snap["pattern"] = pat
     except Exception as e:
         snap.setdefault("errors", []).append(f"形态扫描(双线粘合)失败: {e}")

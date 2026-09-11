@@ -6,7 +6,12 @@
 - 粘合：|MA7 − MA21| / MA21 ≤ 2.5%，且**连续 ≥3 个交易日**
 - 突破：当日 **收盘上穿 MA21**（前一日收盘 ≤ MA21）且 **MA7 上翘**
 - 量能确认：当日成交量 ≥ 前 5 日均量 × 1.5 —— 作为**确认旗标**，不参与"突破"判定
-- 候选池：当日涨停 ∪ 核心池（与 Lab 同池）
+- 候选池（2026-09-11 P1 修复）：**当日涨停 ∪ 核心池 ∪ 全市场异动池**
+  （异动池 = 东财全市场筛出的"上涨 + 放量/活跃 + 未涨停"，见 `quant/data/universe.py`）。
+  修复前只有 涨停 ∪ 核心，而核心池 ⊆ 涨停池 ⇒ ∪ 是空操作，所有"突破"必然是当日涨停股，
+  形态退化成"涨停股二次筛选器"，丧失**在涨停之前发现突破**的能力。
+- 新鲜度守卫（2026-09-11 P3 修复）：K线最后一根 ≠ 目标交易日的票（停牌/延迟）
+  **不产出信号**，只计入 `stale_n` / `stale_codes`；`fresh=False` 供前端提示。
 
 资金流 / 龙虎榜（2026-09-11 新增，用户口径）：
 - 资金流（东财）：当日主力净额 + 净占比、超大单/大单拆解、近 3/5 日累计、连续净流入天数；
@@ -25,7 +30,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from quant.data.kline import fetch_daily, normalize_code, prev_trade_date
 from quant.data.lhb import fetch_lhb_day, lhb_badges
-from quant.data.moneyflow import query_flows
+from quant.data.moneyflow import fill_trend, query_flows, sina_blocked
 
 MA_FAST = 7
 MA_SLOW = 21
@@ -35,8 +40,11 @@ VOL_MULT = 1.5        # 放量确认：成交量 ≥ 前5日均量 × 1.5
 MIN_BARS = MA_SLOW + GLUE_DAYS + 3
 
 FLOW_DAYS = 10        # 资金流回看交易日数（覆盖近5日累计 + 连续天数）
-FLOW_WORKERS = 12     # 资金流并发（云端 60s 超时预算内；40 只约 2~4s）
+# 并发：池子放开到 ~190 只后，资金流成为主要耗时（每只 1~2 个请求）。
+# 实测 16 worker 可把 150 只压到 ~15s（云端 120s 预算内）。
+FLOW_WORKERS = 16
 FLOW_W = (0.5, 0.3, 0.2)   # 资金分权重：当日净占比 / 近3日累计 / 连续净流入
+SCAN_WORKERS = 8      # K线并发（池子变大后从 5 提到 8）
 
 PARAMS = {
     "ma_fast": MA_FAST,
@@ -85,19 +93,21 @@ def build_context(cands: list[dict], date: str, flow_agg=None,
 
     ctx = {
         "date": date,
-        "flow_map": {}, "flow_meta": None,
+        "flow_map": {}, "flow_meta": None, "agg": flow_agg,
         "lhb": None, "lhb_prev": None, "lhb_errors": [], "prev_date": None,
     }
 
     if do_flow:
         try:
+            # defer_sina=True：全池先不打新浪（池子放开到 ~190 只会触发限流），
+            # 多日趋势留到 scan_pattern 里对"有形态信号的票"按需补拉。
             r = query_flows(codes, days=FLOW_DAYS, agg=flow_agg,
-                            max_workers=FLOW_WORKERS)
+                            max_workers=FLOW_WORKERS, defer_sina=True)
             ctx["flow_map"] = r.get("flows") or {}
             ctx["flow_meta"] = {
                 "ask_n": r.get("ask_n"), "hit_n": r.get("hit_n"),
                 "srcs": r.get("srcs") or {}, "errors": r.get("errors") or [],
-                "days": r.get("days"),
+                "days": r.get("days"), "deferred_sina": True,
             }
         except Exception as e:
             ctx["flow_meta"] = {"error": "%s: %s" % (type(e).__name__, e)}
@@ -163,24 +173,49 @@ def _flow_score(recs: list[dict]):
     """给每只票打"资金分"（池内百分位加权，0~100）。
 
     权重 ``FLOW_W`` = 当日主力净占比 / 近3日累计主力净额 / 连续净流入天数。
-    三者先各自做池内百分位（消量纲），再加权。无资金数据的按 50（中性）计分并置
-    ``flow_missing=True`` —— 即"未知"不奖不罚，原始字段仍原样透出供人工判断。
+    三者先各自做池内百分位（消量纲），再加权。
+
+    **缺失项按可用项自动重归一**（2026-09-11 改，P1 池子放开后的必需护栏）：
+    东财多日接口已失效、新浪会反爬限流、自累积表也需数个交易日才成形 ⇒ "近3日/连续"
+    经常整体缺失。若仍按原逻辑把缺失项一律当 50 分代入，分数会被压到 25~75 的窄带
+    且失去区分度。现改为：
+      - ``sum3`` 缺 → 用**当日主力净额**的池内百分位顶替（同向、量纲无关的合理代理）；
+      - ``streak`` 缺 → 该因子直接剔除；
+      - 剩余权重等比重归一；一项都没有 → 50 分（中性）。
+    ``flow_parts`` 透出"实际参与打分的因子数"（1~3），供前端提示可信度。
     """
     ratio = [((r.get("flow") or {}).get("main_ratio")) for r in recs]
-    s3 = [((r.get("flow") or {}).get("sum3")) for r in recs]
+    # sum3 缺失时用当日净额当代理 —— 二者同号（净流入为正），且都做池内百分位
+    strength = []
+    for r in recs:
+        f = r.get("flow") or {}
+        v = f.get("sum3")
+        strength.append(v if v is not None else f.get("main_net"))
     st = [((r.get("flow") or {}).get("streak")) for r in recs]
-    pr, p3, ps = _pct_rank(ratio), _pct_rank(s3), _pct_rank(st)
+    pr, p3, ps = _pct_rank(ratio), _pct_rank(strength), _pct_rank(st)
     w1, w2, w3 = FLOW_W
     for i, r in enumerate(recs):
         if not r.get("flow"):
             r["flow_score"] = 50.0
             r["flow_missing"] = True
+            r["flow_parts"] = 0
             continue
-        a = pr[i] if pr[i] is not None else 50.0
-        b = p3[i] if p3[i] is not None else 50.0
-        c = ps[i] if ps[i] is not None else 50.0
-        r["flow_score"] = round(w1 * a + w2 * b + w3 * c, 1)
-        r["flow_missing"] = pr[i] is None
+        parts = []
+        if pr[i] is not None:
+            parts.append((w1, pr[i]))
+        if p3[i] is not None:
+            parts.append((w2, p3[i]))
+        if ps[i] is not None:
+            parts.append((w3, ps[i]))
+        if not parts:
+            r["flow_score"] = 50.0
+            r["flow_missing"] = True
+            r["flow_parts"] = 0
+            continue
+        tw = sum(w for w, _ in parts)
+        r["flow_score"] = round(sum(w * v for w, v in parts) / tw, 1)
+        r["flow_missing"] = len(parts) < 3
+        r["flow_parts"] = len(parts)
 
 
 def scan_one(item: dict, ctx: dict | None = None) -> dict | None:
@@ -246,7 +281,9 @@ def scan_one(item: dict, ctx: dict | None = None) -> dict | None:
     rec = {
         "code": code,
         "name": nm or item.get("name") or "",
-        "board": int(item.get("board") or 1),
+        # board 只对涨停股有意义（异动池的票当日未涨停，不能显示成"N板"）
+        "board": int(item.get("board") or 0),
+        "pool": item.get("pool") or "zt",     # zt=涨停池 / core=核心池 / active=全市场异动池
         "in_core": bool(item.get("in_core")),
         "date": d,
         "state": state,
@@ -278,27 +315,36 @@ def scan_one(item: dict, ctx: dict | None = None) -> dict | None:
     return rec
 
 
-def scan_pattern(cands: list[dict], max_workers: int = 5,
+def scan_pattern(cands: list[dict], max_workers: int = SCAN_WORKERS,
                  ctx: dict | None = None, date: str | None = None,
-                 flow_agg=None) -> dict:
+                 flow_agg=None, pool_meta: dict | None = None) -> dict:
     """对候选池并发扫描。
 
     返回 ``{scan_n, hit_n, watch_n, hits, watch, params, errors, time_ms,
-    flow_meta, lhb_meta, flow_rows}``
+    flow_meta, lhb_meta, flow_rows, date, latest_bar, fresh, stale_n,
+    stale_codes, pool_meta}``
 
     - ``ctx`` 可由调用方预建（避免与其它模块重复拉取）；缺省时内部构建。
     - 排序（用户口径"资金量参与排序"）：**突破**以资金分为主键、放量为次键；
       **粘合中**仍以粘合天数/粘合度排序（资金分随字段透出，不主导）。
     - 资金流与龙虎榜**不改变突破判定**，命中数不变。
+    - **P3 新鲜度守卫**（2026-09-11 修复）：K线最后一根 ≠ 目标交易日的票（停牌 / 行情
+      未更新 / 数据延迟）**不产出信号**，只计入 ``stale_n`` / ``stale_codes``。
+      修复前这类票会拿旧 bar 静默算出"假突破"，前端看到一个日期对不上的标的却毫无提示。
     """
     t0 = time.time()
     hits: list[dict] = []
     watch: list[dict] = []
+    stale_rows: list[dict] = []
+    bars: set[str] = set()
     errors: list[str] = []
 
     items = list(cands or [])
     if ctx is None:
         ctx = build_context(items, date or "")
+    if pool_meta is not None:
+        ctx = dict(ctx)
+        ctx["pool_meta"] = pool_meta
 
     def work(it):
         try:
@@ -314,6 +360,11 @@ def scan_pattern(cands: list[dict], max_workers: int = 5,
                 if "__err" in r:
                     errors.append(r["__err"])
                     continue
+                if r.get("bar_date"):
+                    bars.add(r["bar_date"])
+                if r.get("stale"):
+                    stale_rows.append(r)     # P3：K线日期对不上 → 只计数，不产出信号
+                    continue
                 if r.get("state") == "突破":
                     hits.append(r)
                 else:
@@ -321,7 +372,35 @@ def scan_pattern(cands: list[dict], max_workers: int = 5,
 
     # 资金分：对"今日全部信号"（突破 + 粘合中）做池内百分位，量纲无关
     allrows = hits + watch
+    trend_meta = {}
     if allrows:
+        # 多日趋势按需补：只给**信号票**打新浪（全池打会限流 → 整批丢趋势）。
+        # agg 自累积可用时零网络开销。
+        sig_codes = [r["code"] for r in allrows]
+        try:
+            patches = fill_trend(ctx.get("flow_map") or {}, sig_codes,
+                                 agg=ctx.get("agg"))
+        except Exception:
+            patches = {}
+        for r in allrows:
+            p = patches.get(r["code"])
+            if p and r.get("flow"):
+                r["flow"].update(p)
+        trend_meta["signal_n"] = len(sig_codes)
+        trend_meta["sina_n"] = len([1 for p in patches.values()
+                                    if p.get("trend_src") == "sina"])
+        trend_meta["agg_n"] = len([1 for p in patches.values()
+                                   if p.get("trend_src") == "agg"])
+        trend_meta["sina_blocked"] = bool(sina_blocked())
+        # 池内趋势来源分布（非信号票按设计不拉趋势 → 计入 none）
+        fm = dict(ctx.get("flow_meta") or {})
+        srcs: dict[str, int] = {}
+        for c in (ctx.get("flow_map") or {}):
+            k = (patches.get(c) or {}).get("trend_src") or "none"
+            srcs[k] = srcs.get(k, 0) + 1
+        fm["srcs"] = srcs
+        fm.update(trend_meta)
+        ctx["flow_meta"] = fm
         _flow_score(allrows)
 
     # 突破：资金分优先，其次放量、粘合天数、涨幅
@@ -360,4 +439,13 @@ def scan_pattern(cands: list[dict], max_workers: int = 5,
             "errors": (ctx.get("lhb_errors") or [])[:4],
         },
         "flow_rows": flow_rows,
+        # ---- P3 新鲜度（K线守卫）----
+        "date": ctx.get("date") or None,
+        "latest_bar": max(bars) if bars else None,   # 池内 K线最新交易日（真实值）
+        "fresh": not stale_rows,                     # False = 有票数据滞后，已从信号中剔除
+        "stale_n": len(stale_rows),
+        "stale_codes": [{"code": r.get("code"), "name": r.get("name"),
+                         "bar_date": r.get("bar_date")} for r in stale_rows[:8]],
+        # ---- 候选池构成（P1：三源合并）----
+        "pool_meta": ctx.get("pool_meta"),
     }

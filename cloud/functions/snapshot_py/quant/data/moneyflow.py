@@ -36,6 +36,7 @@ secid 市场前缀（2026-09-11 实测）
 from __future__ import annotations
 
 import json
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 
 from quant.data.kline import _http, normalize_code
@@ -56,6 +57,26 @@ _HOSTS = (
     "https://push2delay.eastmoney.com",
 )
 
+# ⚠ 性能护栏（2026-09-11 池子放开后新增）：push2his 的 fflow 路径**全平台失效**，
+# 每个 code 都要白试一次会拖垮大批量（150 只 × 1 次失败）。故做"本进程内健康记忆"：
+# 某主机**连续失败 ≥ _DEAD_AFTER 次且从未成功过** → 本进程内不再尝试。
+# 只记失败不记成功的阈值会让偶发抖动误杀好主机，故必须"零成功"才拉黑。
+_DEAD_AFTER = 3
+_HOST_FAILS: dict[str, int] = {}
+_HOST_OK: dict[str, int] = {}
+
+
+def _host_dead(host: str) -> bool:
+    return _HOST_FAILS.get(host, 0) >= _DEAD_AFTER and _HOST_OK.get(host, 0) == 0
+
+
+def _mark(host: str, ok: bool):
+    if ok:
+        _HOST_FAILS[host] = 0
+        _HOST_OK[host] = _HOST_OK.get(host, 0) + 1
+    else:
+        _HOST_FAILS[host] = _HOST_FAILS.get(host, 0) + 1
+
 SINA_URL = ("https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
             "MoneyFlow.ssl_qsfx_zjlrqs")
 _SINA_UA = {
@@ -63,6 +84,13 @@ _SINA_UA = {
                   "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
     "Referer": "https://finance.sina.com.cn/",
 }
+
+# ⚠ 新浪反爬护栏（2026-09-11 实测）：短时间内大量并发打 ssl_qsfx_zjlrqs 会返回
+# **HTTP 456**（反爬限流），此时整批 trend_src 会退化为 None。故：
+#   1) 一旦本进程内见到 456 → 置位 _SINA_BLOCKED，后续直接短路，不再白打；
+#   2) 调用方（fill_trend）只用低并发（3）且**只对信号票**打，不再全池打。
+_SINA_BLOCKED = False
+SINA_WORKERS = 3
 
 DEFAULT_DAYS = 10
 
@@ -113,6 +141,8 @@ def _fetch_raw(code: str, days: int):
     sd = secid(code)
     best, best_host, last_err = [], "", ""
     for host in _HOSTS:
+        if _host_dead(host):          # 本进程内已判定不可用 → 跳过，别白等超时
+            continue
         url = (host + "/api/qt/stock/fflow/daykline/get"
                + "?lmt=%d&klt=101&secid=%s" % (days, sd)
                + "&fields1=" + _F1 + "&fields2=" + _F2 + "&ut=" + EM_UT)
@@ -121,9 +151,11 @@ def _fetch_raw(code: str, days: int):
                 raw = _http(url, timeout=12, headers=_UA)
                 data = (json.loads(raw).get("data") or {})
                 rows = _parse_klines(data.get("klines") or [])
+                _mark(host, True)
             except Exception as e:  # 网络/解析失败都降级
                 last_err = "%s: %s" % (type(e).__name__, e)
                 rows = []
+                _mark(host, False)
             if len(rows) > len(best):
                 best, best_host = rows, host
             if len(rows) >= days:
@@ -141,11 +173,19 @@ def query_sina_rows(code: str, num: int = 20) -> list:
     """新浪资金流历史（近 num 个交易日，升序）。
 
     字段：``net`` 净流入额（元）/ ``r0`` 超大单净流入（元）/ ``ratio`` 净流入率。
-    ⚠ 与东财不同源，仅供趋势参考。
+    ⚠ 与东财不同源，仅供趋势参考。命中 HTTP 456（反爬限流）时置位 ``_SINA_BLOCKED``。
     """
+    global _SINA_BLOCKED
+    if _SINA_BLOCKED:
+        return []
     c = normalize_code(str(code or ""))
     url = "%s?page=1&num=%d&sort=opendate&asc=0&daima=%s" % (SINA_URL, num, c)
-    raw = _http(url, timeout=12, headers=_SINA_UA)
+    try:
+        raw = _http(url, timeout=10, headers=_SINA_UA)
+    except urllib.error.HTTPError as e:
+        if int(getattr(e, "code", 0) or 0) in (456, 403, 429):
+            _SINA_BLOCKED = True          # 本进程内不再尝试，避免持续触发
+        return []
     i = raw.find("[")
     if i < 0:
         return []
@@ -209,6 +249,11 @@ def _agg_series(agg, code: str, before_date: str) -> list:
     return [v for _, v in vals]
 
 
+def sina_blocked() -> bool:
+    """本进程内是否已命中新浪反爬限流（456/403/429）。供调用方透出到前端。"""
+    return _SINA_BLOCKED
+
+
 def flow_tag(main_net, main_ratio) -> str:
     """资金标签（阈值口径，供前端配色/排序）。"""
     if main_net is None:
@@ -223,8 +268,16 @@ def flow_tag(main_net, main_ratio) -> str:
 
 # ---------------------------------------------------------------- 对外接口
 
-def query_flow(code: str, days: int = DEFAULT_DAYS, agg=None) -> dict | None:
-    """单只资金流。返回 None 表示无数据（北交所旧段、停牌、接口全挂等）。"""
+def query_flow(code: str, days: int = DEFAULT_DAYS, agg=None,
+               defer_sina: bool = False) -> dict | None:
+    """单只资金流。返回 None 表示无数据（北交所旧段、停牌、接口全挂等）。
+
+    ``defer_sina=True``：agg / 东财多日都拿不到趋势时**先不打新浪**，把
+    ``trend_src`` 留空，之后由 :func:`fill_trend` 只对"有形态信号的票"补拉。
+    ⚠ 这是必须的护栏（2026-09-11 实测）：池子放开到 ~190 只后，若全池并发打新浪，
+    会触发限流 → 整批 ``trend_src`` 全变 ``None``（资金分退化为中性 50）。
+    而趋势字段只用于**信号票的排序**与展示，非信号票根本不需要。
+    """
     c = normalize_code(str(code or ""))
     rows, host = _fetch_raw(c, days)
     if not rows:
@@ -262,22 +315,61 @@ def query_flow(code: str, days: int = DEFAULT_DAYS, agg=None) -> dict | None:
         s3, s5, st, n = _trend([r["main_net"] for r in rows])
         rec.update(sum3=s3, sum5=s5, streak=st, trend_days=n,
                    trend_src="em", trend_base="em_main_net")
-    # ③ 新浪兜底（口径不同源，必须带标记）
-    if rec["sum3"] is None:
-        try:
-            sr = query_sina_rows(c, num=max(days, 20))
-        except Exception:
-            sr = []
-        if sr and str(sr[-1]["d"]) == rec["date"]:
-            s3, s5, st, n = _trend([x["net"] for x in sr])
-            rec.update(sum3=s3, sum5=s5, streak=st, trend_days=n,
-                       trend_src="sina", trend_base="sina_netamount",
-                       sina_r0_net=sr[-1]["r0"], sina_ratio=sr[-1]["ratio"])
+    # ③ 新浪兜底（口径不同源，必须带标记）—— 可延迟到 fill_trend 只对信号票执行
+    if rec["sum3"] is None and not defer_sina:
+        rec.update(_sina_trend(c, rec["date"], days))
     return rec
 
 
+def _sina_trend(code: str, date: str, days: int = DEFAULT_DAYS) -> dict:
+    """新浪多日趋势补丁；取不到（限流/无数据/日期不符）返回空 dict。"""
+    try:
+        sr = query_sina_rows(code, num=max(days, 20))
+    except Exception:
+        sr = []
+    if not sr or str(sr[-1]["d"]) != date:
+        return {}
+    s3, s5, st, n = _trend([x["net"] for x in sr])
+    return {"sum3": s3, "sum5": s5, "streak": st, "trend_days": n,
+            "trend_src": "sina", "trend_base": "sina_netamount",
+            "sina_r0_net": sr[-1]["r0"], "sina_ratio": sr[-1]["ratio"]}
+
+
+def fill_trend(flow_map: dict, codes: list, agg=None,
+               max_workers: int = SINA_WORKERS) -> dict:
+    """给**指定** code 补多日趋势（agg 优先，缺则新浪）。返回 ``{code: 补丁}``。
+
+    只对"有形态信号的票"调用 —— 趋势仅用于这些票的排序与展示，全池拉会触发限流。
+    低并发（``SINA_WORKERS=3``）是刻意的：新浪 456 反爬对突发并发极敏感。
+    """
+    out: dict[str, dict] = {}
+    # 注意：即使 _SINA_BLOCKED 也不能提前返回 —— agg 自累积这条路仍必须继续走。
+    # （新浪短路已下沉到 query_sina_rows，见其 _SINA_BLOCKED 判断。）
+
+    def work(c):
+        rec = (flow_map or {}).get(c)
+        if not rec or rec.get("sum3") is not None:
+            return c, None
+        hist = _agg_series(agg, c, rec.get("date") or "")
+        if hist:
+            s3, s5, st, n = _trend(hist + [rec.get("main_net")])
+            return c, {"sum3": s3, "sum5": s5, "streak": st, "trend_days": n,
+                       "trend_src": "agg", "trend_base": "em_main_net"}
+        patch = _sina_trend(c, rec.get("date") or "", DEFAULT_DAYS)
+        return c, (patch or None)
+
+    todo = [c for c in dict.fromkeys(codes or []) if c]
+    if not todo:
+        return out
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        for c, patch in ex.map(work, todo):
+            if patch:
+                out[c] = patch
+    return out
+
+
 def query_flows(codes: list, days: int = DEFAULT_DAYS, agg=None,
-                max_workers: int = 8) -> dict:
+                max_workers: int = 8, defer_sina: bool = False) -> dict:
     """并发批量取资金流。
 
     返回 ``{flows: {code: {...}}, errors: [...], hit_n, ask_n, days, srcs: {...}}``
@@ -297,7 +389,7 @@ def query_flows(codes: list, days: int = DEFAULT_DAYS, agg=None,
 
     def work(c):
         try:
-            return c, query_flow(c, days=days, agg=agg), None
+            return c, query_flow(c, days=days, agg=agg, defer_sina=defer_sina), None
         except Exception as e:
             return c, None, "%s: %s" % (type(e).__name__, e)
 

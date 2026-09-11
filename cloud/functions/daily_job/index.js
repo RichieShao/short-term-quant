@@ -44,7 +44,15 @@ async function loadHistCores(limit = 10) {
  * 每只票只保留最近 5 个交易日，避免依赖 where+command 的过滤写法。
  * 失败返回 null（主流程不阻断，代码侧降级新浪）。
  */
-async function loadFlowAgg(maxDocs = 500) {
+/**
+ * 读自累积资金流表，按 code 聚成"近 N 日主力净额序列"。
+ *
+ * ⚠ 容量口径（2026-09-11 池子放开后调整）：形态候选池从 40 扩到 ~190
+ * （涨停 ∪ 核心 ∪ 全市场异动池），每天落库 ~190 行。原来 maxDocs=500 只够
+ * 2.6 天，导致 sum5 / 连续天数**永远凑不满**。现取 3000 行（≈15 天）并每票留 8 日，
+ * 给停牌/缺席留出容差。集合长期约 190 行/日（≈4.7 万行/年），必要时给 date 建索引。
+ */
+async function loadFlowAgg(maxDocs = 3000) {
   try {
     try { await db.createCollection('flow_hist') } catch (e) { /* 已存在 */ }
     const r = await db.collection('flow_hist').orderBy('date', 'desc').limit(maxDocs).get()
@@ -53,7 +61,7 @@ async function loadFlowAgg(maxDocs = 500) {
       const c = d.code
       if (!c || !d.date) continue
       const arr = byCode[c] || (byCode[c] = [])
-      if (arr.length < 5) arr.push({ d: d.date, m: d.m })
+      if (arr.length < 8) arr.push({ d: d.date, m: d.m })
     }
     for (const k of Object.keys(byCode)) {
       byCode[k].sort((a, b) => String(a.d).localeCompare(String(b.d)))

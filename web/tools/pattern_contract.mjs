@@ -74,6 +74,8 @@ function makeApp(S) {
         trendLabel: (f) => TREND_SRC[f.trend_src] || '样本积累中',
         lhbMeta: (pt && pt.lhb_meta) || null,
         flowMeta: (pt && pt.flow_meta) || null,
+        poolMeta: (pt && pt.pool_meta) || null,
+        staleCodes: (pt && pt.stale_codes) || [],
       }
     },
   })
@@ -106,6 +108,21 @@ chk('席位明细折叠', html, '席位明细')
 chk('上榜原因', html, '上榜原因')
 chk('资金流统计', html, '资金流 ')
 chk('龙虎榜统计', html, '龙虎榜 今 ')
+// P1 候选池三源（后端已给 pool_meta 时必须渲染池子构成）
+if (S.pattern && S.pattern.pool_meta) {
+  chk('候选池构成标签', html, '池 涨停')
+  chk('候选池说明', html, '候选池（三源合并）')
+  chk('异动池口径', html, '按量比取前 ')
+}
+// P1 池子来源 chip：异动池的票显示"放量"而非"N板"
+if (S.pattern && (S.pattern.hits || []).some((r) => r.pool === 'active')) {
+  chk('异动池 chip 放量', html, '>放量<')
+}
+// P3 K线新鲜度：正常日 latest_bar == date，不应误报"滞后"
+if (S.pattern && S.pattern.latest_bar === S.pattern.date) {
+  chk('正常日不误报滞后', html, 'K线新鲜度')
+  chk('正常日无滞后告警', html, '已<b>全部剔除、不产出信号</b>', false)
+}
 
 // 分支②：16:40（当日榜未发布）→ 顶部提示在、不出现"未上榜"chip
 const S2 = JSON.parse(JSON.stringify(S))
@@ -129,6 +146,33 @@ chk('已发布未上榜chip', html3, '>未上榜<')
 // 分支④：空数据兜底
 const html4 = await renderToString(makeApp({ ...S, pattern: null }))
 chk('空数据兜底', html4, '暂无形态数据')
+
+// 分支⑤：P3 —— 有标的数据滞后 → 顶部告警 + 剔除清单 + 不出现在信号里
+const S5 = JSON.parse(JSON.stringify(S))
+if (S5.pattern) {
+  S5.pattern.fresh = false
+  S5.pattern.stale_n = 3
+  S5.pattern.latest_bar = '2026-09-09'
+  S5.pattern.stale_codes = [
+    { code: 'sh600001', name: '滞后甲', bar_date: '2026-09-09' },
+    { code: 'sz000002', name: '滞后乙', bar_date: '2026-09-08' },
+  ]
+}
+const html5 = await renderToString(makeApp(S5))
+chk('P3 滞后告警', html5, '已<b>全部剔除、不产出信号</b>')
+chk('P3 滞后计数标签', html5, '>滞后 3<')
+chk('P3 剔除清单', html5, '滞后甲')
+chk('P3 未列完提示', html5, '另 1 只')
+
+// 分支⑥：新浪反爬限流 → 提示 + 资金分降为可用项加权
+const S6 = JSON.parse(JSON.stringify(S))
+if (S6.pattern && S6.pattern.flow_meta) {
+  S6.pattern.flow_meta.sina_blocked = true
+  for (const r of S6.pattern.hits || []) { if (r.flow) r.flow_parts = 1 }
+}
+const html6 = await renderToString(makeApp(S6))
+chk('新浪限流提示', html6, '触发反爬限流')
+chk('资金分项数标记', html6, '·1项<')
 
 console.log(bad === 0 ? '\n全部通过' : `\n${bad} 项未通过`)
 process.exit(bad === 0 ? 0 : 1)

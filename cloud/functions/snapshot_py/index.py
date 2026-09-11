@@ -255,8 +255,8 @@ def main(event, context):
     # 的快照里 pattern.lhb 必为空；夜间用本 action 重算后由 daily_job 只合并
     # snapshot.pattern 一个字段（避免整体 set 覆盖吞字段）。
     if event.get("action") == "pattern_only":
-        from quant.data.kline import normalize_code
         from quant.data.pools import fetch_zt_pool
+        from quant.data.universe import build_pattern_pool
         from quant.indicators.ma_pattern import scan_pattern
         d = str(event.get("date") or today_cn)
         try:
@@ -265,26 +265,17 @@ def main(event, context):
             return {"ok": False, "error": f"zt pool fail: {type(e).__name__}: {e}"}
         if not zt:
             return {"ok": False, "error": f"涨停池为空（{d} 非交易日或数据未发布）"}
-        cmap = {}
-        for x in zt:
-            c = normalize_code(x.get("code", ""))
-            cmap[c] = {"code": c, "name": x.get("name", ""),
-                       "board": int(x.get("board_cnt") or 1), "in_core": False}
-        for c0 in (event.get("cores") or []):
-            c = normalize_code(c0.get("code", ""))
-            if c in cmap:
-                cmap[c]["in_core"] = True
-            else:
-                cmap[c] = {"code": c, "name": c0.get("name", ""),
-                           "board": int(c0.get("board") or 1), "in_core": True}
+        # 候选池与 build_snapshot 完全同口径：涨停 ∪ 核心 ∪ 全市场异动池（P1）
+        items, pmeta = build_pattern_pool(zt_rows=zt, core_rows=event.get("cores") or [])
         try:
-            pat = scan_pattern(list(cmap.values()), date=d,
-                               flow_agg=event.get("flow_agg"))
+            pat = scan_pattern(items, date=d, flow_agg=event.get("flow_agg"),
+                               pool_meta=pmeta)
         except Exception as e:
             import traceback
             return {"ok": False, "error": f"scan_pattern fail: {type(e).__name__}: {e}",
                     "trace": traceback.format_exc()[-600:]}
-        pat["date"] = d
+        if not pat.get("date"):
+            pat["date"] = d
         return {"ok": True, "date": d, "pattern": pat}
 
     mode = event.get("mode", "auto")

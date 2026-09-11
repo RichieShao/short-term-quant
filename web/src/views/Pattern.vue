@@ -28,6 +28,8 @@ const TREND_SRC = { agg: '东财·自累积', em: '东财多日', sina: '新浪�
 const trendLabel = (f) => TREND_SRC[f.trend_src] || '样本积累中'
 const lhbMeta = computed(() => (pt.value && pt.value.lhb_meta) || null)
 const flowMeta = computed(() => (pt.value && pt.value.flow_meta) || null)
+const poolMeta = computed(() => (pt.value && pt.value.pool_meta) || null)
+const staleCodes = computed(() => (pt.value && pt.value.stale_codes) || [])
 </script>
 
 <template>
@@ -50,6 +52,10 @@ const flowMeta = computed(() => (pt.value && pt.value.flow_meta) || null)
           <span class="tag">{{ s.date }} 扫描 {{ pt.scan_n }} 只</span>
           <span class="tag gold">突破 {{ pt.hit_n }}</span>
           <span class="tag">粘合观察 {{ pt.watch_n }}</span>
+          <span v-if="poolMeta" class="tag">
+            池 涨停{{ poolMeta.zt_n }}<template v-if="poolMeta.active_n"> + 异动{{ poolMeta.active_n }}</template><template v-if="poolMeta.core_n"> + 核心{{ poolMeta.core_n }}</template>
+          </span>
+          <span v-if="pt.stale_n" class="tag stale">滞后 {{ pt.stale_n }}</span>
           <span v-if="flowMeta" class="tag">资金流 {{ flowMeta.hit_n }}/{{ flowMeta.ask_n }}</span>
           <span v-if="lhbMeta" class="tag">龙虎榜 今 {{ lhbMeta.today_n == null ? '—' : lhbMeta.today_n }} · 昨 {{ lhbMeta.prev_n == null ? '—' : lhbMeta.prev_n }}</span>
           <span class="tag">{{ pt.time_ms }}ms</span>
@@ -58,9 +64,27 @@ const flowMeta = computed(() => (pt.value && pt.value.flow_meta) || null)
         <div v-if="ebbHint" class="pat-hint tiny">
           当前周期「{{ stage }}」{{ band ? '（' + band + '）' : '' }}：退潮期整体不建议参与，形态仅作观察，别当买入信号。
         </div>
+        <!-- P3：K线新鲜度守卫 -->
+        <div v-if="pt.fresh === false" class="pat-hint tiny">
+          ⚠ 有 <b>{{ pt.stale_n }}</b> 只标的的 K 线最后一根不是 {{ pt.date }}（停牌 / 行情未更新），
+          已<b>全部剔除、不产出信号</b>——避免用旧 bar 算出"假突破"。
+          <template v-if="pt.latest_bar">当前池内最新 K 线日：{{ pt.latest_bar }}。</template>
+          <details class="stale-det">
+            <summary>查看剔除清单</summary>
+            <div v-for="x in staleCodes" :key="x.code" class="seat">
+              {{ x.code }} {{ x.name }} — K线最后日 {{ x.bar_date }}
+            </div>
+            <div v-if="pt.stale_n > staleCodes.length" class="dim">…另 {{ pt.stale_n - staleCodes.length }} 只</div>
+          </details>
+        </div>
         <div v-if="lhbMeta && !lhbMeta.today_n" class="pat-hint tiny info">
           当日龙虎榜尚未发布（约 18:00 后才出）：本次为盘后 16:05/16:40 快照，
           <b>21:00 夜间任务</b>会把当日榜补算进本页。下方「昨上榜」为前一交易日榜，任何时点都可用。
+        </div>
+        <div v-if="flowMeta && flowMeta.sina_blocked" class="pat-hint tiny info">
+          新浪资金流接口本次已触发反爬限流：多日累计（近3/5日、连续天数）整体缺失，
+          资金分已自动降为「可用项重新加权」（看每行的「N项」标记）。
+          <b>长期解是东财自累积</b>——每交易日落一行，约 3 个交易日后 agg 会接管、不再依赖新浪。
         </div>
 
         <div class="pat-sec tiny muted">突破（粘合后上穿 MA21）· 按资金分排序</div>
@@ -68,15 +92,17 @@ const flowMeta = computed(() => (pt.value && pt.value.flow_meta) || null)
         <div v-for="r in hits" :key="r.code" class="pat-row hit">
           <div class="pat-line1">
             <span class="pat-name">{{ r.name }}</span>
-            <span class="pat-chip">{{ r.board }}板</span>
+            <span v-if="r.pool === 'zt'" class="pat-chip">{{ r.board }}板</span>
+            <span v-else-if="r.pool === 'active'" class="pat-chip act">放量</span>
             <span v-if="r.in_core" class="pat-chip core">核心</span>
             <span class="pat-chip vol" :class="r.vol_ok ? 'ok' : ''">
               量比 {{ fmt(r.vol_ratio) }}<template v-if="r.vol_ok"> · 放量</template>
             </span>
-            <span v-if="r.flow_score != null" class="pat-chip flow">资金分 {{ r.flow_score }}</span>
+            <span v-if="r.flow_score != null" class="pat-chip flow">
+              资金分 {{ r.flow_score }}<template v-if="r.flow_parts > 0 && r.flow_parts < 3">·{{ r.flow_parts }}项</template>
+            </span>
             <span v-if="r.lhb" class="pat-chip lhb">上榜</span>
             <span v-else-if="lhbMeta && lhbMeta.today_n" class="pat-chip dim-chip">未上榜</span>
-            <span v-if="r.stale" class="pat-chip stale">K线日期={{ r.bar_date }} 可疑</span>
           </div>
           <div class="pat-line2 tiny dim">
             收 {{ r.close }}（<span :class="pctCls(r.pct)">{{ sign(r.pct) }}{{ r.pct }}%</span>）· MA7 {{ r.ma7 }} · MA21 {{ r.ma21 }} · 粘合 {{ r.glue }}% · 已粘合 {{ r.glue_days }} 日
@@ -146,7 +172,8 @@ const flowMeta = computed(() => (pt.value && pt.value.flow_meta) || null)
           <div v-for="r in watch" :key="r.code" class="pat-row">
             <div class="pat-line1">
               <span class="pat-name">{{ r.name }}</span>
-              <span class="pat-chip">{{ r.board }}板</span>
+              <span v-if="r.pool === 'zt'" class="pat-chip">{{ r.board }}板</span>
+              <span v-else-if="r.pool === 'active'" class="pat-chip act">放量</span>
               <span v-if="r.in_core" class="pat-chip core">核心</span>
               <span class="pat-chip dim-chip">粘合 {{ r.glue_days }} 日</span>
               <span v-if="r.lhb" class="pat-chip lhb">上榜</span>
@@ -168,17 +195,37 @@ const flowMeta = computed(() => (pt.value && pt.value.flow_meta) || null)
         <details class="pat-meta">
           <summary class="tiny muted">口径与免责（务必读一次）</summary>
           <div class="pat-meta-body small dim">
-            <div>候选池：当日涨停 ∪ 核心池（与 Lab 同池，{{ pt.scan_n }} 只）。</div>
+            <div v-if="poolMeta">
+              <b>候选池（三源合并）</b>：当日涨停 <b>{{ poolMeta.zt_n }}</b>
+              ∪ 核心池 <b>{{ poolMeta.core_n }}</b>
+              ∪ 全市场异动池 <b>{{ poolMeta.active_n }}</b> = <b>{{ poolMeta.total_n }}</b> 只。
+              <span v-if="poolMeta.only_zt_effective" style="color: var(--orange)">
+                ⚠ 异动池本轮为空，池子退化为"仅涨停池"。
+              </span>
+              异动池口径：{{ poolMeta.criteria.min_pct }}% ≤ 涨幅 &lt; 涨停，且成交额 ≥
+              {{ (poolMeta.criteria.amount_min / 1e8).toFixed(0) }}亿，且（量比 ≥
+              {{ poolMeta.criteria.vol_min }} 或 换手 ≥ {{ poolMeta.criteria.turn_min }}%），
+              按量比取前 {{ poolMeta.criteria.extra_max }} 只。
+            </div>
+            <div v-else>候选池：当日涨停 ∪ 核心池（历史快照无池子构成信息）。</div>
+            <div v-if="pt.latest_bar">
+              <b>K线新鲜度</b>：池内最新 K 线日 <b>{{ pt.latest_bar }}</b>
+              <template v-if="pt.latest_bar === pt.date">（= 快照日，正常）</template>
+              <span v-else style="color: var(--orange)">（≠ 快照日 {{ pt.date }}，行情未更新）</span>；
+              滞后标的 <b>{{ pt.stale_n }}</b> 只已剔除，不产出信号（防"旧 bar 假突破"）。
+            </div>
             <div>参数：MA{{ pt.params.ma_fast }} / MA{{ pt.params.ma_slow }}；粘合阈值 {{ (pt.params.glue_pct * 100).toFixed(1) }}%；持续 ≥{{ pt.params.glue_days }} 日；放量线 {{ pt.params.vol_mult }}×。</div>
             <div>K线为<b>前复权</b>，按本项目惯例仅作形态判断，不与涨跌幅 / 偏离值混用。</div>
             <div>
               资金流为<b>东财口径</b>（主力净额 = 大单 + 超大单），仅加字段并<b>参与排序</b>，
-              <b>不参与突破判定</b>（命中数不受影响）。
+              <b>不参与突破判定</b>（命中数不受影响）。资金分 = 当日净占比 0.5 + 近3日累计 0.3 + 连续天数 0.2，
+              各因子先做<b>池内百分位</b>；缺失项自动剔除并<b>重新归一</b>（行尾「N项」= 实际参与因子数）。
             </div>
             <div v-if="flowMeta && flowMeta.srcs">
               多日趋势来源分布：<span v-for="(n, k) in flowMeta.srcs" :key="k">{{ k }}={{ n }} </span>。
               <b>agg</b> = 东财自累积（每日落一行，需连续运行数个交易日）·
-              <b>sina</b> = 新浪口径兜底（净流入额口径，绝对值与东财不可比，仅看方向/趋势）。
+              <b>sina</b> = 新浪口径兜底（净流入额口径，绝对值与东财不可比，仅看方向/趋势）·
+              <b>none</b> = 非信号票，按需不拉取（趋势只用于信号票的排序/展示）。
             </div>
             <div>
               龙虎榜：当日榜（T，约 18:00 后发布，16:05/16:40 快照为空，21:00 夜间任务补算）
@@ -250,6 +297,12 @@ const flowMeta = computed(() => (pt.value && pt.value.flow_meta) || null)
 .pat-chip.flow { color: #8fc0ff; border-color: rgba(110, 168, 254, 0.45); background: rgba(110, 168, 254, 0.12); }
 .pat-chip.lhb { color: #ffb27a; border-color: rgba(255, 150, 80, 0.45); background: rgba(255, 150, 80, 0.12); }
 .pat-chip.stale { color: #ff6b78; border-color: rgba(255, 77, 94, 0.4); background: rgba(255, 77, 94, 0.12); }
+/* 候选池来源：全市场异动池（放量、未涨停） */
+.pat-chip.act { color: #7ee0b8; border-color: rgba(62, 207, 142, 0.42); background: rgba(62, 207, 142, 0.12); }
+.pat-stats .tag.stale { color: #ff6b78; border-color: rgba(255, 77, 94, 0.4); background: rgba(255, 77, 94, 0.10); }
+details.stale-det { margin-top: 4px; }
+details.stale-det summary { cursor: pointer; color: var(--t-3); }
+details.stale-det .seat { padding-left: 10px; color: var(--t-2); }
 .pat-line2 { margin-top: 2px; line-height: 1.5; }
 .pat-flow { margin-top: 3px; line-height: 1.7; }
 .pat-flow .src {
