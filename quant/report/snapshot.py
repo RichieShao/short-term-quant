@@ -268,8 +268,14 @@ def _enrich_cores(cores: list[dict], hist_cores: list | None = None) -> list[dic
 
 def build_snapshot(date: str | None = None, with_cores: bool = True,
                    hist_heats: list | None = None,
-                   hist_cores: list | None = None) -> dict:
-    """生成当日完整分析快照。"""
+                   hist_cores: list | None = None,
+                   flow_agg: dict | None = None) -> dict:
+    """生成当日完整分析快照。
+
+    flow_agg: 资金流自累积表（``flow_hist`` 集合读出，形如
+    ``{code: [{"d": "YYYY-MM-DD", "m": 主力净额(元)}, ...]}``），
+    供形态模块算"近 3/5 日累计主力净额 + 连续净流入天数"；缺省时降级新浪口径。
+    """
     if date is None:
         dates = _trade_dates(6)
         today = dates[-1]
@@ -488,6 +494,9 @@ def build_snapshot(date: str | None = None, with_cores: bool = True,
 
     # 双线粘合突破（MA7/MA21）：候选池同 Lab（当日涨停 ∪ 核心池）。
     # 仅"快照日==全局最新交易日"时扫描——历史/补跑跳过（K线形态只对最新日有决策意义）。
+    # 资金流（当日东财明细 + 自累积多日趋势）与龙虎榜（当日 T + 前一交易日 T-1）一并挂载：
+    # 两者只加字段、不参与突破判定；当日榜约 18:00 后发布，16:05/16:40 时 lhb 必为空，
+    # 由 21:00 夜间任务（snapshot_py action=pattern_only）重算并只合并该字段。
     try:
         is_latest = date is None
         if not is_latest:
@@ -507,7 +516,7 @@ def build_snapshot(date: str | None = None, with_cores: bool = True,
                 else:
                     _cmap[c] = {"code": c, "name": c0.get("name", ""),
                                 "board": int(c0.get("board") or 1), "in_core": True}
-            pat = scan_pattern(list(_cmap.values()))
+            pat = scan_pattern(list(_cmap.values()), date=today, flow_agg=flow_agg)
             pat["date"] = today
         snap["pattern"] = pat
     except Exception as e:

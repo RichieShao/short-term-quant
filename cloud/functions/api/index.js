@@ -119,7 +119,7 @@ exports.main = async (event = {}) => {
       const res = await getApp().callFunction({
         name: 'snapshot_py',
         data: { mode: 'force', date: q.date },
-      }, { timeout: 60000 }) // 放宽到 60s：涨停爆发日全量快照约 20-45s，SDK 默认 15s 必超时
+      }, { timeout: 110000 }) // 放宽到 110s：涨停爆发日全量快照 20-45s，再叠加形态资金流/龙虎榜，SDK 默认 15s 必超时
       const r = (res && res.result) || {}
       if (r.ok && r.snapshot) {
         r.snapshot._updatedAt = Date.now()

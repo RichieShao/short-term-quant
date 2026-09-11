@@ -152,16 +152,20 @@ def prev_trade_date(rows: list[dict], asof: str | None = None) -> str | None:
 # ---------- 代码规范化与板块识别 ----------
 
 def normalize_code(raw: str) -> str:
-    """'600519'->'sh600519'；'sz300750'/'300750'->'sz300750'；已带前缀则原样返回（小写）。"""
+    """'600519'->'sh600519'；'sz300750'/'300750'->'sz300750'；已带前缀则原样返回（小写）。
+
+    ⚠ 顺序敏感：北交所前缀必须先判，否则 `92` 会被裸 `9` 抢先命中而错判成沪市
+    （2026-09-11 修复：`920819` 曾返回 `sh920819`，导致行情/资金流双双取不到数）。
+    """
     raw = raw.strip().lower()
     if raw[:2] in ("sh", "sz", "bj"):
         return raw
+    if raw.startswith(("43", "83", "87", "88", "92")):
+        return "bj" + raw
     if raw.startswith(("60", "68", "9")):
         return "sh" + raw
     if raw.startswith(("00", "30", "20", "15", "16")):
         return "sz" + raw
-    if raw.startswith(("43", "83", "87", "88", "92")):
-        return "bj" + raw
     return "sh" + raw  # 兜底
 
 

@@ -30,3 +30,6 @@ u_stock.json
 # ===== 系统 =====
 .DS_Store
 Thumbs.db
+
+# 契约测试产出的临时渲染模块
+web/tools/.render.mjs

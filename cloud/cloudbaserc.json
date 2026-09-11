@@ -23,7 +23,7 @@
       "name": "snapshot_py",
       "runtime": "Python3.7",
       "handler": "index.main",
-      "timeout": 60,
+      "timeout": 120,
       "memorySize": 512,
       "installDependency": false,
       "ignore": [
@@ -36,7 +36,7 @@
       "name": "daily_job",
       "runtime": "Nodejs14.18",
       "handler": "index.main",
-      "timeout": 60,
+      "timeout": 200,
       "memorySize": 256,
       "installDependency": true,
       "ignore": [
@@ -53,6 +53,11 @@
           "name": "daily_1640",
           "type": "timer",
           "config": "0 40 16 * * MON-FRI *"
+        },
+        {
+          "name": "night_2100",
+          "type": "timer",
+          "config": "0 0 21 * * MON-FRI *"
         }
       ]
     },
@@ -84,7 +89,7 @@
       "name": "api",
       "runtime": "Nodejs14.18",
       "handler": "index.main",
-      "timeout": 60,
+      "timeout": 120,
       "memorySize": 256,
       "installDependency": true,
       "ignore": [

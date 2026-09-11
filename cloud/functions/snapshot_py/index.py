@@ -251,6 +251,42 @@ def main(event, context):
         return {"ok": True, "date": d, "pool_n": lab.get("pool_n"),
                 "stage": lab.get("stage"), "scores": scores}
 
+    # 形态块单独重算（供 21:00 夜间任务）：当日龙虎榜约 18:00 后才发布，16:05/16:40
+    # 的快照里 pattern.lhb 必为空；夜间用本 action 重算后由 daily_job 只合并
+    # snapshot.pattern 一个字段（避免整体 set 覆盖吞字段）。
+    if event.get("action") == "pattern_only":
+        from quant.data.kline import normalize_code
+        from quant.data.pools import fetch_zt_pool
+        from quant.indicators.ma_pattern import scan_pattern
+        d = str(event.get("date") or today_cn)
+        try:
+            zt = fetch_zt_pool(d.replace("-", ""))
+        except Exception as e:
+            return {"ok": False, "error": f"zt pool fail: {type(e).__name__}: {e}"}
+        if not zt:
+            return {"ok": False, "error": f"涨停池为空（{d} 非交易日或数据未发布）"}
+        cmap = {}
+        for x in zt:
+            c = normalize_code(x.get("code", ""))
+            cmap[c] = {"code": c, "name": x.get("name", ""),
+                       "board": int(x.get("board_cnt") or 1), "in_core": False}
+        for c0 in (event.get("cores") or []):
+            c = normalize_code(c0.get("code", ""))
+            if c in cmap:
+                cmap[c]["in_core"] = True
+            else:
+                cmap[c] = {"code": c, "name": c0.get("name", ""),
+                           "board": int(c0.get("board") or 1), "in_core": True}
+        try:
+            pat = scan_pattern(list(cmap.values()), date=d,
+                               flow_agg=event.get("flow_agg"))
+        except Exception as e:
+            import traceback
+            return {"ok": False, "error": f"scan_pattern fail: {type(e).__name__}: {e}",
+                    "trace": traceback.format_exc()[-600:]}
+        pat["date"] = d
+        return {"ok": True, "date": d, "pattern": pat}
+
     mode = event.get("mode", "auto")
     date = event.get("date")
     with_cores = event.get("cores", True)
@@ -268,6 +304,46 @@ def main(event, context):
             return {"ok": False, "error": f"{type(e).__name__}: {e}",
                     "trace": traceback.format_exc()[-800:]}
 
+    # 诊断：资金流（多日）+ 龙虎榜 云端可达性。
+    # 必要性：本机沙箱对 push2his 的 fflow 路径有拦截（curl 52 / urllib RemoteDisconnected），
+    # 多日主力净额只能在云端函数内取到，故必须用本 action 验收，而非本地。
+    if event.get("action") == "diag_flow":
+        out = {"ok": True, "now_cn": today_cn}
+        codes = [str(c) for c in (event.get("codes")
+                                  or ["sh600237", "sz300563", "sz000001", "bj920819"])]
+        try:
+            from quant.data.moneyflow import query_flows
+            out["flow"] = query_flows(codes, days=int(event.get("days") or 10))
+        except Exception as e:
+            import traceback
+            out["flow"] = {"error": f"{type(e).__name__}: {e}",
+                           "trace": traceback.format_exc()[-600:]}
+        try:
+            from quant.data.kline import prev_trade_date, fetch_daily
+            from quant.data.lhb import fetch_lhb_day
+            d = str(event.get("date") or today_cn)
+            idx, _ = fetch_daily("sh000001", count=10)
+            pd = prev_trade_date(idx, asof=d)
+            snap = fetch_lhb_day(d)
+            prev_snap = fetch_lhb_day(pd) if pd else None
+            out["lhb"] = {
+                "date": d, "ok": snap["ok"], "n_codes": snap["n_codes"],
+                "n_rows": snap["n_rows"], "errors": snap["errors"],
+                "prev_date": pd,
+                "prev_n_codes": (prev_snap or {}).get("n_codes"),
+                "sample": [
+                    {"code": c, "name": v["name"], "net_amt": v["net_amt"],
+                     "inst": v["inst"], "n_buy_seat": len(v["seats_buy"]),
+                     "n_sell_seat": len(v["seats_sell"]), "reasons": v["reasons"]}
+                    for c, v in list(snap["by_code"].items())[:2]
+                ],
+            }
+        except Exception as e:
+            import traceback
+            out["lhb"] = {"error": f"{type(e).__name__}: {e}",
+                          "trace": traceback.format_exc()[-600:]}
+        return out
+
     if mode == "auto":
         ok, last = is_trade_day(today_cn)
         if not ok:
@@ -277,7 +353,8 @@ def main(event, context):
     try:
         snap = build_snapshot(date, with_cores=with_cores,
                               hist_heats=event.get("hist_heats"),
-                              hist_cores=event.get("hist_cores"))
+                              hist_cores=event.get("hist_cores"),
+                              flow_agg=event.get("flow_agg"))
     except Exception as e:
         import traceback
         return {"ok": False, "error": f"{type(e).__name__}: {e}",

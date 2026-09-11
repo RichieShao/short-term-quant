@@ -33,9 +33,67 @@ async function loadHistCores(limit = 10) {
   }
 }
 
+/**
+ * 资金流自累积表（flow_hist）读取 → 注入 snapshot_py 的 flow_agg。
+ *
+ * 背景：东财唯一的多日资金流接口 push2his/fflow/daykline 已失效（沙箱 + 云端双双
+ * RemoteDisconnected），故多日趋势改由"每日落一行"的自累积表提供；未满窗时代码侧
+ * 自动降级新浪口径并标 trend_src=sina。
+ *
+ * 实现：直接取最近 500 条按 date 倒序（池约 40~90 只/日 → 覆盖 6~12 个交易日），
+ * 每只票只保留最近 5 个交易日，避免依赖 where+command 的过滤写法。
+ * 失败返回 null（主流程不阻断，代码侧降级新浪）。
+ */
+async function loadFlowAgg(maxDocs = 500) {
+  try {
+    try { await db.createCollection('flow_hist') } catch (e) { /* 已存在 */ }
+    const r = await db.collection('flow_hist').orderBy('date', 'desc').limit(maxDocs).get()
+    const byCode = {}
+    for (const d of r.data || []) {
+      const c = d.code
+      if (!c || !d.date) continue
+      const arr = byCode[c] || (byCode[c] = [])
+      if (arr.length < 5) arr.push({ d: d.date, m: d.m })
+    }
+    for (const k of Object.keys(byCode)) {
+      byCode[k].sort((a, b) => String(a.d).localeCompare(String(b.d)))
+    }
+    return Object.keys(byCode).length ? byCode : null
+  } catch (e) {
+    console.error('[daily_job] flow_hist 读取失败（多日资金流降级新浪）:', e.message)
+    return null
+  }
+}
+
+/** 写当日资金流样本（flow_hist，_id = code|date，幂等 upsert）。 */
+async function saveFlowRows(date, rows, maxTry = 2) {
+  const list = (rows || []).filter((r) => r && r.code && r.date)
+  if (!list.length) return { ok: false, skipped: 'no-rows' }
+  try { await db.createCollection('flow_hist') } catch (e) { /* 已存在 */ }
+  let ok = 0
+  for (let i = 0; i < list.length; i += 20) {
+    const chunk = list.slice(i, i + 20)
+    try {
+      await Promise.all(chunk.map((r) => {
+        const doc = {
+          code: r.code, date: String(r.date),
+          m: r.m, x: r.x, l: r.l,
+          src: 'em', updated_at: Date.now(),
+        }
+        delete doc._id
+        return db.collection('flow_hist').doc(`${r.code}|${r.date}`).set(doc)
+      }))
+      ok += chunk.length
+    } catch (e) {
+      console.error(`[daily_job] flow_hist 写入失败（批次 ${i / 20}）: ${e.message}`)
+      if (i === 0) await sleep(1500)
+    }
+  }
+  return { ok: ok > 0, n: ok, total: list.length }
+}
+
 /** 调 snapshot_py 算快照；数据源瞬时抖动时重试（非交易日 skip 不重试）。 */
-async function computeSnapshot(event, maxTry = 3) {
-  let lastErr = null
+async function computeSnapshot(event, maxTry = 3) {  let lastErr = null
   for (let i = 1; i <= maxTry; i++) {
     try {
       const res = await app.callFunction({
@@ -50,7 +108,7 @@ async function computeSnapshot(event, maxTry = 3) {
           prev_cores: event.prev_cores,
           hist_cores: event.hist_cores,
         },
-      }, { timeout: 60000 }) // SDK 默认 15s；涨停爆发日(93家)快照约 20-45s，必须放宽
+      }, { timeout: 110000 }) // SDK 默认 15s；涨停爆发日快照约 20-45s，再叠加形态的资金流/龙虎榜拉取，必须放宽
 
       const r = res && res.result
       if (!r) lastErr = 'snapshot_py 返回为空'
@@ -328,6 +386,91 @@ async function coreTrackFlow(date, r, maxTry = 2) {
   return { settle, saved }
 }
 
+/**
+ * 是否夜间补充运行（21:00）。
+ *
+ * 当日龙虎榜约 18:00 后才发布，16:05/16:40 的快照里 pattern.lhb 必为空。
+ * 判定三重兜底：显式 mode=night / 触发器名 night_2100 / 北京时 >=19:00 的定时触发。
+ * mode=force（手动补跑）**不**判为夜间，避免"补跑历史日"被误当夜间补充。
+ */
+function isNightRun(event) {
+  if (!event) return false
+  if (event.mode === 'night') return true
+  if (event.mode === 'force') return false
+  const tn = String(event.TriggerName || event.triggerName || '')
+  if (tn === 'night_2100') return true
+  const h = new Date(Date.now() + 8 * 3600 * 1000).getUTCHours() // 北京时小时
+  return h >= 19
+}
+
+/**
+ * 夜间补充：只重算形态块（此时当日龙虎榜已发布），再把结果合并回当天 daily 文档。
+ *
+ * ⚠️ 合并方式：读全量文档 → 只替换 snapshot.pattern → 整体 set 回写。
+ *    绝不"只 set pattern"式整体覆盖（历史上 themelife/coretrack 聚合被整体覆盖吞字段）。
+ * 池子取当日 daily 文档里的 cores，保证与 16:40 那次同池，只补龙虎榜/资金流。
+ */
+async function runNight(event) {
+  const t0 = Date.now()
+  const date = rDateOf(event)
+  const ref = db.collection('daily').doc(String(date))
+  let day = null
+  try {
+    const r = await ref.get()
+    day = (r.data && r.data[0]) || null
+  } catch (e) {
+    return { ok: false, error: `读当日 daily 失败: ${e.message}`, date }
+  }
+  if (!day) return { ok: false, error: `当日 daily 文档不存在（${date}），夜间补充跳过`, date }
+
+  const cores = (day.cores || []).map((c) => ({ code: c.code, name: c.name, board: c.board }))
+  const flowAgg = await loadFlowAgg()
+
+  let res = null
+  let lastErr = 'pattern_only 无返回'
+  for (let i = 1; i <= 3; i++) {
+    try {
+      const out = await app.callFunction({
+        name: 'snapshot_py',
+        data: { action: 'pattern_only', date, cores, flow_agg: flowAgg },
+      }, { timeout: 110000 }) // 形态+资金流+龙虎榜实测 15s（冷启动走新浪兜底时更久），SDK 默认 15s 必超时
+      res = out && out.result
+      if (res && res.ok) break
+      lastErr = (res && res.error) || 'pattern_only 失败'
+    } catch (e) {
+      lastErr = `callFunction 失败: ${e.message}`
+    }
+    console.error(`[daily_job] 夜间补充第 ${i}/3 次失败: ${lastErr}`)
+    if (i < 3) await sleep(3000 * i)
+  }
+  if (!res || !res.ok) return { ok: false, error: lastErr, date }
+
+  const pat = res.pattern
+  const flowWrite = await saveFlowRows(date, pat.flow_rows)
+  // 合并回写：保留既有全部字段，只换 pattern。
+  // ⚠️ daily 文档就是"扁平快照本体"（saveSnapshot 直接 set(snap)，api 直接把它当 snapshot 返回），
+  //    所以 pattern 在**顶层**，不是 doc.snapshot.pattern。
+  const doc = Object.assign({}, day)
+  delete doc._id
+  doc.pattern = pat
+  // 清理误写产生的多余嵌套键（2026-09-11 首版曾误按 doc.snapshot.pattern 合并）
+  if (doc.snapshot) delete doc.snapshot
+  doc._updatedAt = Date.now()
+  try {
+    await ref.set(doc)
+  } catch (e) {
+    return { ok: false, error: `合并回写失败: ${e.message}`, date }
+  }
+  return {
+    ok: true, date, night: true,
+    hit_n: pat.hit_n, watch_n: pat.watch_n, scan_n: pat.scan_n,
+    lhb_today: (pat.lhb_meta || {}).today, lhb_today_n: (pat.lhb_meta || {}).today_n,
+    flow_srcs: (pat.flow_meta || {}).srcs, flow_rows: (pat.flow_rows || []).length,
+    flow_agg_codes: flowAgg ? Object.keys(flowAgg).length : 0,
+    flow_write: flowWrite, costMs: Date.now() - t0,
+  }
+}
+
 async function run(event = {}) {
   const t0 = Date.now()
   // 滚动校准基线：提前读取，随事件传给 snapshot_py（读失败不阻断主流程）
@@ -345,6 +488,9 @@ async function run(event = {}) {
   // 核心池在池天数：近 10 日核心池 code 集合
   const histCores = await loadHistCores(10)
   if (histCores && histCores.length) event.hist_cores = histCores
+  // 资金流自累积：近 N 日样本注入形态模块（算近3/5日累计 + 连续净流入天数）
+  const flowAgg = await loadFlowAgg()
+  if (flowAgg) event.flow_agg = flowAgg
 
   const r = await computeSnapshot(event)
   if (!r || !r.ok) return r || { ok: false, error: 'snapshot_py 无返回' } // skipped / error 原样透传
@@ -354,6 +500,8 @@ async function run(event = {}) {
   const err = await saveSnapshot(r.date, snap)
   if (err) return { ok: false, error: `写库失败: ${err}`, date: r.date }
 
+  // 资金流样本落库（flow_hist）：供次日及以后算多日累计；失败不阻断主流程
+  const flowWrite = await saveFlowRows(r.date, (snap.pattern || {}).flow_rows || [])
   // 题材生命期聚合（失败不阻断主流程，仅记返回）
   const tl = await updateThemeLife(r.date, snap.ths_tags)
   // 滚动校准聚合（失败不阻断主流程）
@@ -366,6 +514,13 @@ async function run(event = {}) {
     heat: snap.sentiment && snap.sentiment.heat,
     stage: snap.cycle && snap.cycle.stage,
     cores: (snap.cores || []).length,
+    pattern: snap.pattern ? {
+      hit_n: snap.pattern.hit_n, watch_n: snap.pattern.watch_n,
+      flow_srcs: (snap.pattern.flow_meta || {}).srcs,
+      lhb_today_n: (snap.pattern.lhb_meta || {}).today_n,
+    } : null,
+    flow_agg_codes: flowAgg ? Object.keys(flowAgg).length : 0,
+    flow_write: flowWrite,
     themelife: tl,
     calib,
     core_track: ct,
@@ -387,12 +542,15 @@ async function writeRunLog(t0, out, event) {
       skipped: out.skipped || null,
       cost_ms: Date.now() - t0,
       error: (out.ok || out.skipped) ? null : (out.error || 'unknown'),
-      mode: (event && event.mode) || 'auto',
+      mode: (event && event.mode) || (out.night ? 'night' : 'auto'),
+      // 触发器名留痕：用于确认 21:00 夜间触发器是否按预期按下发名判定
+      trigger: (event && (event.TriggerName || event.triggerName)) || null,
       subs: {
         calib: out.calib ? (out.calib.ok ? 'ok' : (out.calib.skipped || 'fail')) : null,
         themelife: out.themelife ? (out.themelife.ok ? 'ok' : (out.themelife.skipped || 'fail')) : null,
         core_track: out.core_track ? ((out.core_track.settle || {}).ok ? 'ok'
           : (out.core_track.settle || {}).skipped || 'fail') : null,
+        flow_write: out.flow_write ? (out.flow_write.ok ? `n=${out.flow_write.n}` : (out.flow_write.skipped || 'fail')) : null,
       },
     }
     delete rec._id
@@ -406,7 +564,7 @@ exports.main = async (event = {}) => {
   const t0 = Date.now()
   let out
   try {
-    out = await run(event)
+    out = isNightRun(event) ? await runNight(event) : await run(event)
   } catch (e) {
     out = { ok: false, error: (e && e.message) || String(e) }
   }
