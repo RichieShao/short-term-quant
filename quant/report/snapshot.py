@@ -272,7 +272,8 @@ def build_snapshot(date: str | None = None, with_cores: bool = True,
                    hist_cores: list | None = None,
                    flow_agg: dict | None = None,
                    holder_map: dict | None = None,
-                   holder_refresh_all: bool = False) -> dict:
+                   holder_refresh_all: bool = False,
+                   self_codes: list | None = None) -> dict:
     """生成当日完整分析快照。
 
     flow_agg: 资金流自累积表（``flow_hist`` 集合读出，形如
@@ -514,7 +515,8 @@ def build_snapshot(date: str | None = None, with_cores: bool = True,
             is_latest = bool(_gl and today == _gl[-1])
         pat = None
         if is_latest:
-            _items, _pmeta = build_pattern_pool(zt_rows=zt_today, core_rows=cores)
+            _items, _pmeta = build_pattern_pool(zt_rows=zt_today, core_rows=cores,
+                                                self_codes=self_codes)
             pat = scan_pattern(_items, date=today, flow_agg=flow_agg, pool_meta=_pmeta,
                                holder_map=holder_map,
                                holder_refresh_all=holder_refresh_all)

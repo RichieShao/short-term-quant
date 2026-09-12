@@ -328,15 +328,21 @@ def scan_one(item: dict, ctx: dict | None = None) -> dict | None:
         state = "粘合中"
 
     if not state:
-        return None
+        if not item.get("in_self"):
+            return None
+        # 用户自选票：无形态信号也返回精简记录（state="自选"），单列展示 ——
+        # 否则自选功能"看不见"票在哪儿，只有等它偶然粘合才出现。字段与正式信号
+        # 同构（前端自选区复用同一套渲染），但不进 hits/watch 主榜。
+        state = "自选"
 
     rec = {
         "code": code,
         "name": nm or item.get("name") or "",
         # board 只对涨停股有意义（异动池的票当日未涨停，不能显示成"N板"）
         "board": int(item.get("board") or 0),
-        "pool": item.get("pool") or "zt",     # zt=涨停池 / core=核心池 / active=全市场异动池
+        "pool": item.get("pool") or "zt",     # zt=涨停池 / core=核心池 / active=异动池 / self=自选
         "in_core": bool(item.get("in_core")),
+        "in_self": bool(item.get("in_self")),  # 用户自选票（watchlist），仅展示标记
         "date": d,
         "state": state,
         "close": round(close, 2),
@@ -393,6 +399,7 @@ def scan_pattern(cands: list[dict], max_workers: int = SCAN_WORKERS,
     t0 = time.time()
     hits: list[dict] = []
     watch: list[dict] = []
+    selfs: list[dict] = []      # 自选票中当前无信号的（state="自选"），单列展示
     stale_rows: list[dict] = []
     bars: set[str] = set()
     errors: list[str] = []
@@ -427,14 +434,20 @@ def scan_pattern(cands: list[dict], max_workers: int = SCAN_WORKERS,
                     continue
                 if r.get("state") == "突破":
                     hits.append(r)
+                elif r.get("state") == "自选":
+                    selfs.append(r)      # 自选无信号：单列展示，不进主榜
                 else:
                     watch.append(r)
 
     # 资金分：对"今日全部信号"（突破 + 粘合中）做池内百分位，量纲无关
     allrows = hits + watch
+    # 自选票也要资金流数据（趋势补拉含自选，但**不参与**百分位——分母仍是信号票）
+    score_rows = list(allrows)
+    if selfs:
+        allrows = allrows + selfs
     trend_meta = {}
     if allrows:
-        # 多日趋势按需补：只给**信号票**打新浪（全池打会限流 → 整批丢趋势）。
+        # 多日趋势按需补：只给**信号票+自选票**打新浪（全池打会限流 → 整批丢趋势）。
         # agg 自累积可用时零网络开销。
         sig_codes = [r["code"] for r in allrows]
         try:
@@ -461,7 +474,7 @@ def scan_pattern(cands: list[dict], max_workers: int = SCAN_WORKERS,
         fm["srcs"] = srcs
         fm.update(trend_meta)
         ctx["flow_meta"] = fm
-        _flow_score(allrows)
+        _flow_score(score_rows)
 
     # ---- 消息面定性（「上涨逻辑」，2026-09-12 新增，quant/data/news.py）----
     # 只对**信号票**（突破 + 粘合观察，约 75 只）抓 T-1 与 T 两天的 F10 资讯：
@@ -473,7 +486,7 @@ def scan_pattern(cands: list[dict], max_workers: int = SCAN_WORKERS,
             news_map = classify_batch(
                 [r["code"] for r in allrows], ctx.get("date") or date,
                 ctx.get("prev_date") or "",
-                detail_codes=[r["code"] for r in hits])
+                detail_codes=[r["code"] for r in (hits + selfs)])
             for r in allrows:
                 r["news"] = news_map.get(r["code"])
             dist: dict[str, int] = {}
@@ -490,6 +503,8 @@ def scan_pattern(cands: list[dict], max_workers: int = SCAN_WORKERS,
                              -(r.get("glue_days") or 0), -(r.get("pct") or 0)))
     # 粘合中：仍以"粘合天数长 + 粘合紧"为主（未突破前资金分噪声大）
     watch.sort(key=lambda r: (-(r.get("glue_days") or 0), (r.get("glue") or 99)))
+    # 自选（无信号）：按涨幅排
+    selfs.sort(key=lambda r: -(r.get("pct") or 0))
 
     # 落库用的逐日资金流行（daily_job 写 flow_hist）。
     # 取**全池**（含无形态信号的票）以最大化自累积覆盖率——多日累计需要连续样本，
@@ -506,8 +521,10 @@ def scan_pattern(cands: list[dict], max_workers: int = SCAN_WORKERS,
         "scan_n": len(items),
         "hit_n": len(hits),
         "watch_n": len(watch),
+        "self_n": len(selfs),
         "hits": hits,
         "watch": watch[:30],
+        "selfs": selfs[:30],
         "params": PARAMS,
         "errors": errors[:8],
         "time_ms": int((time.time() - t0) * 1000),

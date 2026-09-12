@@ -207,13 +207,18 @@ def fetch_active_pool(max_n: int = EXTRA_MAX, sorts=_SORTS) -> list[dict]:
 # ---------------------------------------------------------------- 候选池组装（两个调用方共用）
 
 def build_pattern_pool(zt_rows=None, core_rows=None, with_extra: bool = True,
-                       extra_max: int = EXTRA_MAX):
-    """组装形态候选池：**涨停池 ∪ 核心池 ∪ 全市场异动池**。
+                       extra_max: int = EXTRA_MAX,
+                       self_codes: list | None = None):
+    """组装形态候选池：**涨停池 ∪ 核心池 ∪ 全市场异动池 ∪ 用户自选**。
 
     返回 ``(items, pool_meta)``；``items`` 元素形如
-    ``{code, name, board, in_core, pool}``，``pool`` ∈ ``zt`` / ``core`` / ``active``。
+    ``{code, name, board, in_core, pool, in_self}``，``pool`` ∈ ``zt`` / ``core`` / ``active`` / ``self``。
 
-    ``pool_meta`` 供前端与排障用，含三源计数与异动池口径。
+    ``self_codes``：用户自选票（watchlist 集合，由调用方读出传入——本模块无网络外
+    依赖原则不直接碰数据库）。自选票**无条件入池**（不受异动池过滤条件限制），
+    与其他票同权扫描；若已在涨停/核心/异动池中则只标 ``in_self`` 不重复。
+
+    ``pool_meta`` 供前端与排障用，含四源计数与异动池口径。
     """
     cmap: dict[str, dict] = {}
 
@@ -259,10 +264,25 @@ def build_pattern_pool(zt_rows=None, core_rows=None, with_extra: bool = True,
                    "in_core": False, "pool": "active"}
         extra_new += 1
 
+    # ---- 第四源：用户自选（无条件入池，同权扫描）----
+    self_new = 0
+    for raw in (self_codes or []):
+        c = normalize_code(str(raw or ""))
+        if not c:
+            continue
+        if c in cmap:
+            cmap[c]["in_self"] = True     # 已在池中 → 只打标
+            self_new += 1
+            continue
+        cmap[c] = {"code": c, "name": "", "board": 0,
+                   "in_core": False, "pool": "self", "in_self": True}
+        self_new += 1
+
     meta = {
         "zt_n": zt_n,                       # 涨停池
         "core_n": core_only_n,              # 核心池中不在涨停池的部分
         "active_n": extra_new,              # 异动池新增（去重后）
+        "self_n": self_new,                 # 用户自选（去重后）
         "active_fetched": len(extra),       # 异动池过滤后总数（截断前）
         "total_n": len(cmap),
         "criteria": {

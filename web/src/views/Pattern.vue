@@ -1,11 +1,13 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { useSnap } from '../stores/snap'
+import { callApi } from '../api/cloud'
 
 const s = useSnap()
 const pt = computed(() => s.pattern)
 const hits = computed(() => (pt.value && pt.value.hits) || [])
 const watch = computed(() => (pt.value && pt.value.watch) || [])
+const selfs = computed(() => (pt.value && pt.value.selfs) || [])
 const stage = computed(() => (s.cycle && s.cycle.stage) || '')
 // 周期 band 才是「冰点-退潮」的真实载体（stage 取值只有 启动/发酵/高潮/震荡/退潮，无「冰点」）
 const band = computed(() => (s.sentiment && s.sentiment.band) || '')
@@ -55,6 +57,60 @@ const wan = (v) => (v == null ? '—' : (v > 0 ? '+' : '') + Number(v).toFixed(0
 // 利好=涨红、风险=警示橙、题材/资金=金、静默不渲染
 const newsTagCls = (tag) => (tag === '风险·警示' ? 'risk'
   : tag === '利好·公告' ? 'good' : '')
+
+// ---- 自选标的（watchlist 集合，多端共享，每日随池同权扫描）----
+const selfCodes = ref([])
+const selfInput = ref('')
+const selfBusy = ref(false)
+const selfErr = ref('')
+const selfHint = ref('')
+// 与 python normalize_code 同规则（北交所前缀优先）
+const normCode = (raw) => {
+  const n = String(raw || '').trim()
+  if (!/^\d{6}$/.test(n)) return ''
+  if (/^(43|83|87|88|92)/.test(n)) return 'bj' + n
+  if (/^(60|68|9)/.test(n)) return 'sh' + n
+  if (/^(00|30|20|15|16)/.test(n)) return 'sz' + n
+  return 'sh' + n
+}
+const loadSelf = async () => {
+  try {
+    const r = await callApi('watchlist')
+    selfCodes.value = (r && r.codes) || []
+  } catch (e) { /* 自选条读取失败不阻断页面 */ }
+}
+const saveSelf = async (codes, note) => {
+  selfBusy.value = true
+  selfErr.value = ''
+  selfHint.value = ''
+  try {
+    const r = await callApi('watchlist', { codes: codes.join(',') })
+    selfCodes.value = (r && r.codes) || codes
+    // 新增标的不会立刻出现在下方卡片里——快照是定时扫描生成的，要等下一次扫描才进榜
+    selfHint.value = note || '已保存 · 新增标的将在下次扫描后进榜'
+  } catch (e) {
+    selfErr.value = '保存失败，稍后再试'
+  }
+  selfBusy.value = false
+}
+const addSelf = () => {
+  const c = normCode(selfInput.value)
+  if (!c) { selfErr.value = '请输入 6 位数字代码'; return }
+  if (selfCodes.value.includes(c)) { selfErr.value = '已在自选'; selfInput.value = ''; return }
+  if (selfCodes.value.length >= 30) { selfErr.value = '最多 30 只'; return }
+  selfErr.value = ''
+  selfInput.value = ''
+  saveSelf([...selfCodes.value, c], '已加入自选 ✓ 卡片将在下次扫描（交易日 16:05 / 21:00）后进榜')
+}
+const delSelf = (c) => saveSelf(selfCodes.value.filter((x) => x !== c), '已移除 ✓')
+// chips 显示名称：优先用快照里的真实名称（selfs 有全维度数据），否则退回代码
+const selfLabel = (c) => {
+  const r = (selfs.value || []).find((x) => x.code === c)
+  return (r && r.name) ? r.name : c
+}
+// 收盘价距 MA21 的百分比（自选票判断"离突破还有多远"）
+const distMa21 = (r) => ((r.close - r.ma21) / r.ma21) * 100
+onMounted(loadSelf)
 </script>
 
 <template>
@@ -129,8 +185,9 @@ const newsTagCls = (tag) => (tag === '风险·警示' ? 'risk'
             <span class="pat-name">{{ r.name }}</span>
             <span v-if="r.pool === 'zt'" class="pat-chip">{{ r.board }}板</span>
             <span v-else-if="r.pool === 'active'" class="pat-chip act">放量</span>
-            <span v-if="r.in_core" class="pat-chip core">核心</span>
-            <span class="pat-chip vol" :class="r.vol_ok ? 'ok' : ''">
+<span v-if="r.in_core" class="pat-chip core">核心</span>
+<span v-if="r.in_self" class="pat-chip core">自选</span>
+<span class="pat-chip vol" :class="r.vol_ok ? 'ok' : ''">
               量比 {{ fmt(r.vol_ratio) }}<template v-if="r.vol_ok"> · 放量</template>
             </span>
             <span v-if="r.flow_score != null" class="pat-chip flow">
@@ -288,8 +345,9 @@ const newsTagCls = (tag) => (tag === '风险·警示' ? 'risk'
               <span class="pat-name">{{ r.name }}</span>
               <span v-if="r.pool === 'zt'" class="pat-chip">{{ r.board }}板</span>
               <span v-else-if="r.pool === 'active'" class="pat-chip act">放量</span>
-              <span v-if="r.in_core" class="pat-chip core">核心</span>
-              <span class="pat-chip dim-chip">粘合 {{ r.glue_days }} 日</span>
+<span v-if="r.in_core" class="pat-chip core">核心</span>
+<span v-if="r.in_self" class="pat-chip core">自选</span>
+<span class="pat-chip dim-chip">粘合 {{ r.glue_days }} 日</span>
               <span v-if="r.lhb" class="pat-chip lhb">上榜</span>
             </div>
             <div class="pat-line2 tiny dim">
@@ -315,14 +373,121 @@ const newsTagCls = (tag) => (tag === '风险·警示' ? 'risk'
           </div>
         </template>
 
+        <!-- 自选标的：watchlist 多端共享，每日随池同权扫描；无信号也单列在此 -->
+        <div class="divider"></div>
+        <div class="pat-sec tiny muted">自选标的（每日随池扫描 · 无信号也列在此 · 最多 30 只）</div>
+        <div class="self-bar">
+          <input v-model="selfInput" class="self-input" placeholder="6 位代码" maxlength="6"
+                 inputmode="numeric" @keyup.enter="addSelf" />
+          <button class="self-btn" :disabled="selfBusy" @click="addSelf">添加</button>
+          <span class="tiny dim">{{ selfCodes.length }}/30</span>
+          <span v-if="selfErr" class="self-err tiny">{{ selfErr }}</span>
+        </div>
+        <div v-if="selfHint" class="tiny dim" style="margin: 2px 0 6px 2px">{{ selfHint }}</div>
+        <div v-if="selfCodes.length" class="self-chips">
+          <span v-for="c in selfCodes" :key="c" class="self-chip">
+            {{ selfLabel(c) }}<b class="self-x" @click="delSelf(c)">×</b>
+          </span>
+        </div>
+        <div v-for="r in selfs" :key="'s' + r.code" class="pat-row">
+          <div class="pat-line1">
+            <span class="pat-name">{{ r.name }}</span>
+            <span class="pat-chip core">自选</span>
+          </div>
+          <div class="pat-line2 tiny dim">
+            收 {{ r.close }}（<span :class="pctCls(r.pct)">{{ sign(r.pct) }}{{ r.pct }}%</span>）
+            · MA7 {{ r.ma7 }} · MA21 {{ r.ma21 }}
+            · <span :class="pctCls(distMa21(r))">距 MA21 {{ sign(distMa21(r)) }}{{ fmt(distMa21(r), 1) }}%</span>
+            <template v-if="r.glue_days"> · 粘合 {{ r.glue_days }} 日</template>
+          </div>
+          <div v-if="r.flow" class="pat-flow tiny dim">
+            主力 <b :class="pctCls(r.flow.main_net)">{{ money(r.flow.main_net) }}</b>
+            · 连续 {{ r.flow.streak > 0 ? '净流入' + r.flow.streak + '日' : (r.flow.streak < 0 ? '净流出' + (-r.flow.streak) + '日' : '—') }}
+            <span class="src" :class="r.flow.trend_src === 'sina' ? 'warn' : ''">{{ trendLabel(r.flow) }}</span>
+          </div>
+          <div v-if="r.holder && !r.holder.failed" class="pat-holder tiny dim">
+            <span class="hold-lead">资金性质</span>
+            <span v-for="(t, i) in r.holder.tags" :key="'sh' + i" class="hold-tag sm">{{ t }}</span>
+            <span class="dim">· 报告期 {{ r.holder.date }}</span>
+            <details class="hold-det">
+              <summary>明细</summary>
+              <div class="hold-box">
+                <div class="hold-cap">十大流通股东口径（占流通股 %）</div>
+                <div v-for="(x, i) in holderCats(r.holder)" :key="'hc' + i" class="hold-row">
+                  <span class="hold-cat">{{ x.cat }}</span>
+                  <span>{{ x.d.n }} 家 · {{ fmt(x.d.pct, 3) }}%</span>
+                  <span v-if="x.d.chg != null" :class="pctCls(x.d.chg)">{{ wan(x.d.chg) }}</span>
+                  <span v-if="x.d.new" class="hold-new">新进 {{ x.d.new }}</span>
+                  <span class="dim hold-names">{{ (x.d.top || []).join('、') }}</span>
+                </div>
+                <template v-if="holderOrg(r.holder).length">
+                  <div class="hold-cap">全体机构口径（比十大完整，二者不可相加）</div>
+                  <div v-for="(x, i) in holderOrg(r.holder)" :key="'ho' + i" class="hold-row org">
+                    <span class="hold-cat">{{ x.cat }}</span>
+                    <span>{{ x.d.n == null ? '—' : x.d.n }} 家 · {{ fmt(x.d.pct, 3) }}%</span>
+                  </div>
+                </template>
+                <div v-if="r.holder.ctrl" class="hold-row">
+                  <span class="hold-cat">实际控制人</span><span>{{ r.holder.ctrl }}</span>
+                </div>
+                <div v-if="r.holder.hnum != null" class="hold-row">
+                  <span class="hold-cat">股东户数</span>
+                  <span>{{ r.holder.hnum.toLocaleString() }} 户</span>
+                  <span v-if="r.holder.hnum_chg != null" :class="pctCls(r.holder.hnum_chg)">
+                    {{ sign(r.holder.hnum_chg) }}{{ fmt(r.holder.hnum_chg, 1) }}%
+                  </span>
+                  <span class="dim">{{ r.holder.focus || '' }} {{ r.holder.hnum_date || '' }}</span>
+                </div>
+                <div v-if="r.holder.h_pct" class="hold-row dim">
+                  <span class="hold-cat">H 股（港交所名义持有）</span>
+                  <span>{{ fmt(r.holder.h_pct, 2) }}% · 非北向，仅备注</span>
+                </div>
+                <div v-if="(r.holder.recent || []).length" class="hold-cap">近期持股变动（临时公告口径，比季报新）</div>
+                <div v-for="(x, i) in r.holder.recent" :key="'hr' + i" class="hold-row subtle">
+                  <span class="hold-cat">{{ x.d }}</span>
+                  <span class="dim hold-names">{{ x.name }}</span>
+                  <span :class="pctCls(x.chg)">{{ x.chg == null ? '—' : (x.chg > 0 ? '增持' : '减持') + (Math.abs(x.chg) / 1e4).toFixed(0) + '万股' }}</span>
+                  <span class="dim">{{ x.why }}</span>
+                </div>
+                <div class="hold-foot dim">
+                  季报口径，滞后最多 1 个季度 —— 描述「谁在持有」，不是「今天谁在买」；
+                  当日谁在买请看龙虎榜席位的「席位性质」。
+                </div>
+              </div>
+            </details>
+          </div>
+          <div v-else-if="holderMeta && !holderMeta.error" class="pat-holder tiny dim">
+            资金性质：无数据（未进入十大流通股东披露 / 接口未返回）
+          </div>
+          <div v-if="r.news && r.news.tag && r.news.tag !== '静默'" class="pat-holder tiny dim">
+            <span class="hold-lead">消息</span>
+            <span class="hold-tag sm" :class="newsTagCls(r.news.tag)">{{ r.news.tag }}</span>
+            <span v-if="r.news.when" class="dim">{{ r.news.when }}</span>
+            <span v-if="r.news.why" class="dim">· {{ r.news.why }}</span>
+            <details v-if="(r.news.titles || []).length" class="hold-det">
+              <summary>相关消息 {{ r.news.titles.length }} 条</summary>
+              <div class="hold-box news-box">
+                <div v-for="(t, i) in r.news.titles" :key="'sn' + i" class="news-line tiny dim">{{ t }}</div>
+                <div class="hold-foot dim">
+                  F10 资讯口径（公告 + 相关新闻），关键词定性宁缺勿滥；
+                  T 15:00 收盘后的消息不参与利好/题材定性（风险警示例外，宁可错杀）。
+                </div>
+              </div>
+            </details>
+          </div>
+        </div>
+        <div v-if="selfCodes.length && !selfs.length" class="tiny dim" style="padding: 2px 0 6px">
+          自选票将在下一次快照刷新（收盘后自动）后带全维度数据入列
+        </div>
+
         <div class="divider"></div>
         <details class="pat-meta">
           <summary class="tiny muted">口径与免责（务必读一次）</summary>
           <div class="pat-meta-body small dim">
             <div v-if="poolMeta">
-              <b>候选池（三源合并）</b>：当日涨停 <b>{{ poolMeta.zt_n }}</b>
+              <b>候选池（三源合并 + 自选）</b>：当日涨停 <b>{{ poolMeta.zt_n }}</b>
               ∪ 核心池 <b>{{ poolMeta.core_n }}</b>
-              ∪ 全市场异动池 <b>{{ poolMeta.active_n }}</b> = <b>{{ poolMeta.total_n }}</b> 只。
+              ∪ 全市场异动池 <b>{{ poolMeta.active_n }}</b><template v-if="poolMeta.self_n"> ∪ 自选 <b>{{ poolMeta.self_n }}</b></template> = <b>{{ poolMeta.total_n }}</b> 只。
               <span v-if="poolMeta.only_zt_effective" style="color: var(--orange)">
                 ⚠ 异动池本轮为空，池子退化为"仅涨停池"。
               </span>
@@ -531,6 +696,46 @@ details.lhb-det summary { cursor: pointer; color: var(--t-3); font-size: 10px; }
 .news-box { display: flex; flex-direction: column; gap: 2px; }
 .news-line { line-height: 1.6; }
 .news-risk-n { color: #ffd479; font-weight: 600; }
+
+/* 自选标的 */
+.self-bar { display: flex; align-items: center; gap: 8px; margin: 4px 0 6px; flex-wrap: wrap; }
+.self-input {
+  width: 110px;
+  padding: 7px 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--t-1);
+  font-size: 13px;
+  letter-spacing: 1px;
+}
+.self-input:focus { outline: none; border-color: rgba(233, 183, 92, 0.55); }
+.self-btn {
+  padding: 7px 14px;
+  border-radius: var(--r-sm);
+  border: 1px solid rgba(233, 183, 92, 0.45);
+  background: var(--gold-dim);
+  color: var(--gold);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.self-btn:disabled { opacity: 0.5; }
+.self-err { color: #ffd479; }
+.self-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 8px; }
+.self-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--t-2);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--line);
+}
+.self-x { cursor: pointer; color: var(--t-3); font-weight: 700; padding: 0 2px; }
+.self-x:active { color: #ff6b78; }
 details.hold-det { margin-top: 3px; }
 details.hold-det summary { cursor: pointer; color: var(--t-3); font-size: 10px; }
 .hold-box {

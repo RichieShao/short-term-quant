@@ -265,8 +265,9 @@ def main(event, context):
             return {"ok": False, "error": f"zt pool fail: {type(e).__name__}: {e}"}
         if not zt:
             return {"ok": False, "error": f"涨停池为空（{d} 非交易日或数据未发布）"}
-        # 候选池与 build_snapshot 完全同口径：涨停 ∪ 核心 ∪ 全市场异动池（P1）
-        items, pmeta = build_pattern_pool(zt_rows=zt, core_rows=event.get("cores") or [])
+        # 候选池与 build_snapshot 完全同口径：涨停 ∪ 核心 ∪ 全市场异动池 ∪ 用户自选
+        items, pmeta = build_pattern_pool(zt_rows=zt, core_rows=event.get("cores") or [],
+                                          self_codes=event.get("self_codes") or [])
         try:
             pat = scan_pattern(items, date=d, flow_agg=event.get("flow_agg"),
                                pool_meta=pmeta,
@@ -422,7 +423,8 @@ def main(event, context):
                               hist_cores=event.get("hist_cores"),
                               flow_agg=event.get("flow_agg"),
                               holder_map=event.get("holder_map"),
-                              holder_refresh_all=bool(event.get("holder_refresh_all")))
+                              holder_refresh_all=bool(event.get("holder_refresh_all")),
+                              self_codes=event.get("self_codes"))
     except Exception as e:
         import traceback
         return {"ok": False, "error": f"{type(e).__name__}: {e}",

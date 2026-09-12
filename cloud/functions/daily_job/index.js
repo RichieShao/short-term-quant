@@ -127,6 +127,23 @@ async function loadHolderCache(maxDocs = 400) {
 }
 
 /**
+ * 读用户自选票（watchlist 集合，_id='default' 单文档 codes 数组，前端 api 云函数维护）。
+ * 扫描时并入候选池（第四源「自选」，无条件入池、同权扫描）。
+ * 失败返回 []：形态照跑，只是没有自选票（不阻断主流程）。
+ */
+async function loadSelfWatch(maxN = 30) {
+  try {
+    const r = await db.collection('watchlist').doc('default').get()
+    const w = (r.data && r.data[0]) || null
+    return ((w && w.codes) || []).map((x) => String(x).trim().toLowerCase())
+      .filter(Boolean).slice(0, maxN)
+  } catch (e) {
+    console.error('[daily_job] watchlist 读取失败（自选票不并入）:', e.message)
+    return []
+  }
+}
+
+/**
  * 写资金性质底色（holder_cache，_id = code，幂等 upsert）。
  * 只写"本次新抓到的票"（缓存命中的不重写），故日常通常 no-rows。
  */
@@ -237,6 +254,8 @@ async function computeSnapshot(event, maxTry = 3) {
           flow_agg: event.flow_agg,
           // 资金性质底色缓存（季报口径，日内不变）——Python 侧只补缺失/过期的票
           holder_map: event.holder_map,
+          // 用户自选票（第四源，无条件入池、同权扫描）
+          self_codes: event.self_codes,
         },
       }, { timeout: 110000 }) // SDK 默认 15s；涨停爆发日快照约 20-45s，再叠加形态的资金流/龙虎榜拉取，必须放宽
 
@@ -556,6 +575,7 @@ async function runNight(event) {
   const cores = (day.cores || []).map((c) => ({ code: c.code, name: c.name, board: c.board }))
   const flowAgg = await loadFlowAgg()
   const holderCache = await loadHolderCache()
+  const selfCodes = await loadSelfWatch()
 
   // 重算形态（可带不同 holder_map）；抽成闭包供"缺口自愈"复跑一次
   const callPattern = async (holderMap) => {
@@ -567,6 +587,8 @@ async function runNight(event) {
           data: {
             action: 'pattern_only', date, cores, flow_agg: flowAgg,
             holder_map: holderMap,
+            // 用户自选票（第四源）——夜间重算与日间同口径
+            self_codes: selfCodes,
             // 显式全量刷新（补灌/季报换季时用），日常不传
             holder_refresh_all: !!event.holder_refresh_all,
           },
@@ -614,7 +636,7 @@ async function runNight(event) {
     flow_write: flowWrite,
     holder_meta: pat.holder_meta, holder_write: hf.write,
     holder_sync_n: hf.sync_n || 0, holder_need_n: hf.need_n || 0,
-    news_meta: pat.news_meta,
+    news_meta: pat.news_meta, self_n: pat.self_n,
     costMs: Date.now() - t0,
   }
 }
@@ -642,6 +664,9 @@ async function run(event = {}) {
   // 资金性质底色缓存（季报口径）：整包注入，Python 侧按需补拉缺失/过期的票
   const holderCache = await loadHolderCache()
   if (holderCache) event.holder_map = holderCache
+  // 用户自选票（第四源）：并入候选池，无条件入池、同权扫描
+  const selfCodes = await loadSelfWatch()
+  if (selfCodes.length) event.self_codes = selfCodes
 
   const r = await computeSnapshot(event)
   if (!r || !r.ok) return r || { ok: false, error: 'snapshot_py 无返回' } // skipped / error 原样透传
@@ -656,7 +681,7 @@ async function run(event = {}) {
       const out = await app.callFunction({
         name: 'snapshot_py',
         data: { action: 'pattern_only', date: r.date, cores: coresForPat,
-                flow_agg: flowAgg, holder_map: cache },
+                flow_agg: flowAgg, holder_map: cache, self_codes: selfCodes },
       }, { timeout: 110000 })
       const r2 = out && out.result
       return (r2 && r2.ok && r2.pattern) || null

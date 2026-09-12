@@ -96,6 +96,25 @@ function makeApp(S) {
         staleCodes: (pt && pt.stale_codes) || [],
         holderMeta: (pt && pt.holder_meta) || null,
         newsMeta: (pt && pt.news_meta) || null,
+        // 自选标的（SSR 不跑 onMounted/fetch，用静态值验证渲染契约）
+        selfs: (pt && pt.selfs) || [],
+        selfCodes: S.selfCodes || [],
+        selfInput: '', selfBusy: false, selfErr: '',
+        selfHint: S.selfHint || '',
+        normCode: (raw) => {
+          const n = String(raw || '').trim()
+          if (!/^\d{6}$/.test(n)) return ''
+          if (/^(43|83|87|88|92)/.test(n)) return 'bj' + n
+          if (/^(60|68|9)/.test(n)) return 'sh' + n
+          if (/^(00|30|20|15|16)/.test(n)) return 'sz' + n
+          return 'sh' + n
+        },
+        addSelf: () => {}, delSelf: () => {},
+        selfLabel: (c) => {
+          const r = ((pt && pt.selfs) || []).find((x) => x.code === c)
+          return (r && r.name) ? r.name : c
+        },
+        distMa21: (r) => ((r.close - r.ma21) / r.ma21) * 100,
         holderCats, holderOrg, seatKinds, wan, newsTagCls,
       }
     },
@@ -132,7 +151,7 @@ chk('龙虎榜统计', html, '龙虎榜 今 ')
 // P1 候选池三源（后端已给 pool_meta 时必须渲染池子构成）
 if (S.pattern && S.pattern.pool_meta) {
   chk('候选池构成标签', html, '池 涨停')
-  chk('候选池说明', html, '候选池（三源合并）')
+  chk('候选池说明', html, '候选池（三源合并 + 自选）')
   chk('异动池口径', html, '按量比取前 ')
 }
 // P1 池子来源 chip：异动池的票显示"放量"而非"N板"
@@ -282,6 +301,58 @@ chk('粘合卡·消息标签', html9, '题材·共振')
 chk('口径块·消息面', html9, '消息面（上涨逻辑）')
 chk('口径块·宁可错杀', html9, '宁可错杀')
 chk('静默不渲染', html9, '静默', false)
+
+// 分支⑩：自选标的 —— 底部管理区 + selfs 票卡 + 池构成含自选
+const S10 = JSON.parse(JSON.stringify(S))
+if (S10.pattern) {
+  S10.pattern.pool_meta = Object.assign({}, S10.pattern.pool_meta || {},
+    { self_n: 2, total_n: 192 })
+  S10.pattern.selfs = [{
+    code: 'sh601012', name: '隆基绿能', state: '自选', close: 11.32, pct: -3.25,
+    ma7: 11.726, ma21: 12.131, glue: 3.34, glue_days: 0,
+    flow: { main_net: -1.52e8, streak: -4, trend_src: 'agg' },
+    holder: {
+      tags: ['社保持仓', '北向重仓', '公募抱团'], date: '2026-06-30',
+      cats: {
+        '社保基金': { n: 1, pct: 2.104, chg: 12.3, new: 0, top: ['自选样本社保组合'] },
+        '北向资金': { n: 1, pct: 2.365, chg: -2759.8, new: 0, top: ['香港中央结算有限公司'] },
+      },
+      org: { '社保基金': { n: 3, pct: 2.41 } },
+      ctrl: '自选样本实控人', hnum: 115000, hnum_chg: -2.1, hnum_date: '2026-06-30',
+      recent: [{ d: '09-02', name: '自选样本近期股东', chg: 812, why: '深股通' }],
+    },
+    news: { tag: '资金·独行', when: '', why: '', n: 3,
+      titles: ['自选样本消息甲', '自选样本消息乙', '自选样本消息丙'] },
+  }]
+}
+S10.selfCodes = ['sh601012', 'sz002594']
+const html10 = await renderToString(makeApp(S10))
+chk('自选区标题', html10, '自选标的（每日随池扫描')
+chk('自选输入框', html10, '6 位代码')
+chk('自选添加按钮', html10, '添加')
+chk('自选上限', html10, '2/30')
+chk('自选chips名称', html10, '隆基绿能')
+chk('自选票卡chip', html10, '>自选<')
+chk('自选距MA21', html10, '距 MA21')
+chk('自选资金流', html10, '净流出4日')
+chk('自选底色', html10, '北向重仓')
+// 自选票卡明细折叠（与突破卡同款）
+chk('自选资金性质明细入口', html10, '· 报告期 2026-06-30')
+chk('自选资金明细十大口径', html10, '自选样本社保组合')
+chk('自选资金明细全体机构', html10, '自选样本实控人')
+chk('自选资金明细近期变动', html10, '自选样本近期股东')
+chk('自选消息明细条数', html10, '相关消息 3 条')
+chk('自选消息明细标题', html10, '自选样本消息甲')
+console.log('__DUMP10__' + JSON.stringify((html10.match(/异动池 <b>[\s\S]{0,120}/) || [])[0]))
+chk('口径块·四源', html10, '∪ 自选 <b>2</b>')
+chk('口径块标题', html10, '候选池（三源合并 + 自选）')
+
+// 分支⑪：自选添加成功提示（新标的不立即进榜，须等下次扫描）
+const S11 = JSON.parse(JSON.stringify(S10))
+S11.selfHint = '已加入自选 ✓ 卡片将在下次扫描（交易日 16:05 / 21:00）后进榜'
+const html11 = await renderToString(makeApp(S11))
+chk('自选添加提示', html11, '已加入自选 ✓ 卡片将在下次扫描')
+chk('自选提示进榜时点', html11, '16:05 / 21:00')
 
 // 分支⑧：无资金性质数据 → 不崩、且不渲染任何资金性质标签/说明
 const S8 = JSON.parse(JSON.stringify(S))
