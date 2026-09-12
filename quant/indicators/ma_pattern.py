@@ -13,12 +13,16 @@
 - 新鲜度守卫（2026-09-11 P3 修复）：K线最后一根 ≠ 目标交易日的票（停牌/延迟）
   **不产出信号**，只计入 `stale_n` / `stale_codes`；`fresh=False` 供前端提示。
 
-资金流 / 龙虎榜（2026-09-11 新增，用户口径）：
+资金流 / 龙虎榜 / 资金性质（2026-09-11 起逐步新增）：
 - 资金流（东财）：当日主力净额 + 净占比、超大单/大单拆解、近 3/5 日累计、连续净流入天数；
   **参与排序**（池内百分位），但**不参与突破判定**（不减少命中数）。
 - 龙虎榜（东财）：当日榜 `lhb` 与前一交易日榜 `lhb_prev` **两者都存**；
   上榜的加徽章标签，未上榜的按常态处理（`None`）。
   ⚠ 当日榜约 18:00 后才发布 ⇒ 16:05/16:40 快照里 `lhb` 必为空，需 18:00 后的补充任务重算。
+- **资金性质「底色」**（2026-09-12 新增，`quant/data/holders.py`）：十大流通股东按
+  公募/北向/QFII/社保/险资/私募/产业资本/国家队/牛散分类，挂 `rec["holder"]`。
+  这是**季报口径**（滞后最多 1 季度），描述"谁在持有"；当日"谁在买"由龙虎榜席位回答。
+  季报数据日内不变 ⇒ 走 `holder_cache` 集合缓存，只对"缓存缺失 / 报告期过期"的票抓取。
 
 说明：本模块会被 CloudBase Python3.7 云函数直接引用，故启用
 `from __future__ import annotations` 以兼容 PEP604 写法（X | None）。
@@ -28,6 +32,8 @@ from __future__ import annotations
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+from quant.data.holders import pick_refresh, seat_kind, today_str
+from quant.data.news import classify_batch
 from quant.data.kline import fetch_daily, normalize_code, prev_trade_date
 from quant.data.lhb import fetch_lhb_day, lhb_badges
 from quant.data.moneyflow import fill_trend, query_flows, sina_blocked
@@ -55,6 +61,7 @@ PARAMS = {
     "fq": "qfq",
     "flow_days": FLOW_DAYS,
     "flow_w": {"ratio": FLOW_W[0], "sum3": FLOW_W[1], "streak": FLOW_W[2]},
+    "holder_note": "季报口径（十大流通股东分类），描述'谁在持有'；当日'谁在买'看龙虎榜席位",
     "note": "前复权仅作形态判断；量能为确认旗标；资金流参与排序但不参与突破判定",
 }
 
@@ -77,13 +84,19 @@ def _glue(closes: list[float], i: int):
 # ---------------------------------------------------------------- 资金流 / 龙虎榜 上下文
 
 def build_context(cands: list[dict], date: str, flow_agg=None,
-                  do_flow: bool = True, do_lhb: bool = True) -> dict:
-    """预取"整池共用"的资金流与龙虎榜，避免逐股重复请求。
+                  do_flow: bool = True, do_lhb: bool = True,
+                  holder_map: dict | None = None,
+                  holder_refresh_all: bool = False) -> dict:
+    """预取"整池共用"的资金流、龙虎榜与资金性质底色，避免逐股重复请求。
 
     - 资金流：逐股并发（东财只提供单股接口），带自累积表 ``flow_agg``；
     - 龙虎榜：**按日拉全市场三张表**（明细 / 机构席位 / 营业部席位），
       当日榜约 18:00 后才发布 ⇒ 盘后 16:05/16:40 拉到的 ``lhb`` 必为空，
       需由 21:00 夜间任务重算；``lhb_prev``（T-1，两者都存）任何时点都可用。
+    - 资金性质底色（``holder_map``）：季报口径，日内不变 ⇒ 由调用方从
+      ``holder_cache`` 读出传入；本函数**只补"缓存缺失 / 报告期过期"的票**，
+      并把新抓到的记录放进 ``holder_new`` 由调用方写回。冷启动（首次全池）
+      约 15~20s，之后进入季报窗口前都是零开销。
     """
     codes = []
     for it in cands or []:
@@ -95,7 +108,25 @@ def build_context(cands: list[dict], date: str, flow_agg=None,
         "date": date,
         "flow_map": {}, "flow_meta": None, "agg": flow_agg,
         "lhb": None, "lhb_prev": None, "lhb_errors": [], "prev_date": None,
+        "holder": dict(holder_map or {}), "holder_meta": None,
     }
+
+    # ---- 资金性质底色（季报，缓存 + 只报缺口，不在本函数抓取）----
+    # ⚠ 抓取**刻意不放在这里**（2026-09-12 踩坑）：一只票的记录约 1KB，190 只 ≈180KB；
+    #   若随本次返回一起回传，会撞上"嵌套 callFunction 响应过大被平台截断"，
+    #   实测 179 条只回来 10 条（静默，不报错）。而且它会写进 daily 文档，
+    #   让接口响应白白膨胀。故本函数只算出**缺口清单**（几十字节/条），
+    #   由调用方（daily_job）分批调 ``action=holder_sync`` 抓取后写库，再用完整缓存重算。
+    try:
+        uniq = list(dict.fromkeys(codes))
+        need = pick_refresh(uniq, ctx["holder"], date or today_str(),
+                            force=holder_refresh_all)
+        ctx["holder_meta"] = {
+            "ask_n": len(uniq), "cached_n": len(ctx["holder"]),
+            "need_n": len(need), "need": need[:400],
+        }
+    except Exception as e:
+        ctx["holder_meta"] = {"error": "%s: %s" % (type(e).__name__, e)}
 
     if do_flow:
         try:
@@ -128,6 +159,25 @@ def build_context(cands: list[dict], date: str, flow_agg=None,
     return ctx
 
 
+def _seat_kinds(seats_buy: list, seats_sell: list) -> dict:
+    """买卖席位按性质归并 → ``{性质: {n, buy, sell, net}}``（净额单位：元）。"""
+    out: dict[str, dict] = {}
+    for side, rows in (("buy", seats_buy or []), ("sell", seats_sell or [])):
+        for s in rows:
+            k = seat_kind(s.get("name"))
+            d = out.setdefault(k, {"n": 0, "buy": 0.0, "sell": 0.0, "net": 0.0,
+                                   "seats": []})
+            d["n"] += 1
+            b = s.get("buy") or 0.0
+            sl = s.get("sell") or 0.0
+            d["buy"] += b
+            d["sell"] += sl
+            d["net"] += (s.get("net") if s.get("net") is not None else (b - sl))
+            if len(d["seats"]) < 2 and s.get("name"):
+                d["seats"].append(s["name"][:20])
+    return out
+
+
 def _lhb_brief(snap: dict | None, code: str) -> dict | None:
     """把某只票的龙虎榜记录压成前端可用的精简节点；未上榜返回 None（常态处理）。"""
     if not snap or not snap.get("ok"):
@@ -152,6 +202,8 @@ def _lhb_brief(snap: dict | None, code: str) -> dict | None:
         "inst": n.get("inst"),                # 机构专用席位
         "seats_buy": n.get("seats_buy") or [],
         "seats_sell": n.get("seats_sell") or [],
+        # 席位按资金性质归并（游资 / 机构专用 / 北向专用）—— T+0 的"谁在买"
+        "kinds": _seat_kinds(n.get("seats_buy"), n.get("seats_sell")),
         "fwd": n.get("fwd") or {},            # 上榜后 1/2/5/10 日涨跌幅
         "tags": lhb_badges(n),                # 徽章短标签
     }
@@ -309,6 +361,8 @@ def scan_one(item: dict, ctx: dict | None = None) -> dict | None:
         rec["flow"] = None
     rec["lhb"] = _lhb_brief(ctx.get("lhb"), code)            # 当日榜（18:00 前为空）
     rec["lhb_prev"] = _lhb_brief(ctx.get("lhb_prev"), code)  # 前一交易日榜（两者都存）
+    # 资金性质「底色」（季报口径，十大流通股东分类；缺数据为 None）
+    rec["holder"] = (ctx.get("holder") or {}).get(code)
     # P3 新鲜度旗标：K线最后一日 != 目标交易日时，形态/资金流日期均可疑
     rec["bar_date"] = d
     rec["stale"] = bool(ctx.get("date") and d != ctx.get("date"))
@@ -317,17 +371,21 @@ def scan_one(item: dict, ctx: dict | None = None) -> dict | None:
 
 def scan_pattern(cands: list[dict], max_workers: int = SCAN_WORKERS,
                  ctx: dict | None = None, date: str | None = None,
-                 flow_agg=None, pool_meta: dict | None = None) -> dict:
+                 flow_agg=None, pool_meta: dict | None = None,
+                 holder_map: dict | None = None,
+                 holder_refresh_all: bool = False) -> dict:
     """对候选池并发扫描。
 
     返回 ``{scan_n, hit_n, watch_n, hits, watch, params, errors, time_ms,
-    flow_meta, lhb_meta, flow_rows, date, latest_bar, fresh, stale_n,
-    stale_codes, pool_meta}``
+    flow_meta, lhb_meta, holder_meta, news_meta, flow_rows, date, latest_bar,
+    fresh, stale_n, stale_codes, pool_meta}``
 
     - ``ctx`` 可由调用方预建（避免与其它模块重复拉取）；缺省时内部构建。
     - 排序（用户口径"资金量参与排序"）：**突破**以资金分为主键、放量为次键；
       **粘合中**仍以粘合天数/粘合度排序（资金分随字段透出，不主导）。
-    - 资金流与龙虎榜**不改变突破判定**，命中数不变。
+    - 资金流、龙虎榜、资金性质**都不改变突破判定**，命中数不变。
+    - ``holder_meta.need``：资金性质缓存里"缺失 / 报告期过期"的 code 清单（通常为空）。
+      调用方据此分批抓取并写库后，**用完整缓存再调一次本函数**即可带上底色。
     - **P3 新鲜度守卫**（2026-09-11 修复）：K线最后一根 ≠ 目标交易日的票（停牌 / 行情
       未更新 / 数据延迟）**不产出信号**，只计入 ``stale_n`` / ``stale_codes``。
       修复前这类票会拿旧 bar 静默算出"假突破"，前端看到一个日期对不上的标的却毫无提示。
@@ -341,7 +399,9 @@ def scan_pattern(cands: list[dict], max_workers: int = SCAN_WORKERS,
 
     items = list(cands or [])
     if ctx is None:
-        ctx = build_context(items, date or "")
+        ctx = build_context(items, date or "", flow_agg=flow_agg,
+                            holder_map=holder_map,
+                            holder_refresh_all=holder_refresh_all)
     if pool_meta is not None:
         ctx = dict(ctx)
         ctx["pool_meta"] = pool_meta
@@ -403,6 +463,27 @@ def scan_pattern(cands: list[dict], max_workers: int = SCAN_WORKERS,
         ctx["flow_meta"] = fm
         _flow_score(allrows)
 
+    # ---- 消息面定性（「上涨逻辑」，2026-09-12 新增，quant/data/news.py）----
+    # 只对**信号票**（突破 + 粘合观察，约 75 只）抓 T-1 与 T 两天的 F10 资讯：
+    # 突破票带 3 条标题明细（~250B/票），粘合票只给标签（~80B/票），合计 ~9KB，
+    # 远低于嵌套响应截断线。定性不参与排序与突破判定（与资金流同口径：只展示）。
+    news_meta = None
+    if allrows and (ctx.get("date") or date):
+        try:
+            news_map = classify_batch(
+                [r["code"] for r in allrows], ctx.get("date") or date,
+                ctx.get("prev_date") or "",
+                detail_codes=[r["code"] for r in hits])
+            for r in allrows:
+                r["news"] = news_map.get(r["code"])
+            dist: dict[str, int] = {}
+            for rec in news_map.values():
+                t = rec.get("tag") or "?"
+                dist[t] = dist.get(t, 0) + 1
+            news_meta = {"ask_n": len(allrows), "ok_n": len(news_map), "dist": dist}
+        except Exception as e:
+            news_meta = {"error": "%s: %s" % (type(e).__name__, e)}
+
     # 突破：资金分优先，其次放量、粘合天数、涨幅
     hits.sort(key=lambda r: (-(r.get("flow_score") if r.get("flow_score") is not None else 50),
                              -(r.get("vol_ratio") or 0),
@@ -439,6 +520,9 @@ def scan_pattern(cands: list[dict], max_workers: int = SCAN_WORKERS,
             "errors": (ctx.get("lhb_errors") or [])[:4],
         },
         "flow_rows": flow_rows,
+        # ---- 资金性质底色（季报）----
+        # 只回"缓存缺口"清单；记录本体由调用方分批 action=holder_sync 抓取（见 build_context 注释）
+        "holder_meta": ctx.get("holder_meta"),
         # ---- P3 新鲜度（K线守卫）----
         "date": ctx.get("date") or None,
         "latest_bar": max(bars) if bars else None,   # 池内 K线最新交易日（真实值）
@@ -448,4 +532,6 @@ def scan_pattern(cands: list[dict], max_workers: int = SCAN_WORKERS,
                          "bar_date": r.get("bar_date")} for r in stale_rows[:8]],
         # ---- 候选池构成（P1：三源合并）----
         "pool_meta": ctx.get("pool_meta"),
+        # ---- 消息面定性（「上涨逻辑」）----
+        "news_meta": news_meta,
     }

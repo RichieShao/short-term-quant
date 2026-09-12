@@ -30,6 +30,31 @@ const lhbMeta = computed(() => (pt.value && pt.value.lhb_meta) || null)
 const flowMeta = computed(() => (pt.value && pt.value.flow_meta) || null)
 const poolMeta = computed(() => (pt.value && pt.value.pool_meta) || null)
 const staleCodes = computed(() => (pt.value && pt.value.stale_codes) || [])
+const holderMeta = computed(() => (pt.value && pt.value.holder_meta) || null)
+const newsMeta = computed(() => (pt.value && pt.value.news_meta) || null)
+
+// ---- 资金性质（季报底色）----
+// 展示顺序：越"强信号"的类别越靠前；游资不在此列（季报拿不到，由龙虎榜席位给）。
+const HOLDER_ORDER = ['国家队', '社保基金', 'QFII', '险资', '公募基金', '私募',
+  '北向资金', '产业资本', '牛散']
+const holderCats = (h) => (h && h.cats
+  ? HOLDER_ORDER.filter((c) => h.cats[c]).map((c) => ({ cat: c, d: h.cats[c] }))
+  : [])
+const holderOrg = (h) => (h && h.org
+  ? HOLDER_ORDER.filter((c) => h.org[c]).map((c) => ({ cat: c, d: h.org[c] }))
+  : [])
+// 龙虎榜席位性质（T+0 的"谁在买"）
+const SEAT_ORDER = ['机构专用', '北向专用', '游资营业部']
+const seatKinds = (lhb) => {
+  const k = (lhb && lhb.kinds) || {}
+  return SEAT_ORDER.filter((x) => k[x]).map((x) => ({ kind: x, d: k[x] }))
+}
+// 万股 → 带正负号的展示
+const wan = (v) => (v == null ? '—' : (v > 0 ? '+' : '') + Number(v).toFixed(0) + '万股')
+// ---- 消息面定性（「上涨逻辑」）----
+// 利好=涨红、风险=警示橙、题材/资金=金、静默不渲染
+const newsTagCls = (tag) => (tag === '风险·警示' ? 'risk'
+  : tag === '利好·公告' ? 'good' : '')
 </script>
 
 <template>
@@ -57,6 +82,12 @@ const staleCodes = computed(() => (pt.value && pt.value.stale_codes) || [])
           </span>
           <span v-if="pt.stale_n" class="tag stale">滞后 {{ pt.stale_n }}</span>
           <span v-if="flowMeta" class="tag">资金流 {{ flowMeta.hit_n }}/{{ flowMeta.ask_n }}</span>
+          <span v-if="holderMeta" class="tag">
+            资金性质 {{ holderMeta.cached_n == null ? '—' : holderMeta.cached_n }}/{{ holderMeta.ask_n == null ? '—' : holderMeta.ask_n }}<template v-if="holderMeta.need_n"> · 待补 {{ holderMeta.need_n }}</template>
+          </span>
+          <span v-if="newsMeta && !newsMeta.error" class="tag">
+            消息面 {{ newsMeta.ok_n == null ? '—' : newsMeta.ok_n }}/{{ newsMeta.ask_n == null ? '—' : newsMeta.ask_n }}<template v-if="newsMeta.dist && newsMeta.dist['风险·警示']"> · <span class="news-risk-n">⚠{{ newsMeta.dist['风险·警示'] }}</span></template>
+          </span>
           <span v-if="lhbMeta" class="tag">龙虎榜 今 {{ lhbMeta.today_n == null ? '—' : lhbMeta.today_n }} · 昨 {{ lhbMeta.prev_n == null ? '—' : lhbMeta.prev_n }}</span>
           <span class="tag">{{ pt.time_ms }}ms</span>
         </div>
@@ -85,6 +116,10 @@ const staleCodes = computed(() => (pt.value && pt.value.stale_codes) || [])
           新浪资金流接口本次已触发反爬限流：多日累计（近3/5日、连续天数）整体缺失，
           资金分已自动降为「可用项重新加权」（看每行的「N项」标记）。
           <b>长期解是东财自累积</b>——每交易日落一行，约 3 个交易日后 agg 会接管、不再依赖新浪。
+        </div>
+        <div v-if="holderMeta && holderMeta.error" class="pat-hint tiny info">
+          资金性质（季报底色）本轮抓取异常：{{ holderMeta.error }}。形态与资金流不受影响，
+          仅本页缺少"谁在持有"的底色标签。
         </div>
 
         <div class="pat-sec tiny muted">突破（粘合后上穿 MA21）· 按资金分排序</div>
@@ -145,6 +180,13 @@ const staleCodes = computed(() => (pt.value && pt.value.stale_codes) || [])
                   / 净 <b :class="pctCls(r.lhb.inst.net)">{{ money(r.lhb.inst.net) }}</b>
                 </div>
                 <div v-else class="dim">机构席位：无</div>
+                <div v-if="seatKinds(r.lhb).length" class="seatkinds">
+                  <b>席位性质</b>（当日谁在买）：
+                  <span v-for="(s, i) in seatKinds(r.lhb)" :key="i"
+                        class="seatkind" :class="{ inst: s.kind === '机构专用', north: s.kind === '北向专用' }">
+                    {{ s.kind }} {{ s.d.n }} 席 · 净{{ money(s.d.net) }}
+                  </span>
+                </div>
                 <div v-if="(r.lhb.seats_buy || []).length">
                   <b>买入席位</b>：
                   <div v-for="(x, i) in r.lhb.seats_buy" :key="i" class="seat">
@@ -160,6 +202,78 @@ const staleCodes = computed(() => (pt.value && pt.value.stale_codes) || [])
                 <div class="dim">
                   上榜后：1日 {{ fmt(r.lhb.fwd && r.lhb.fwd.d1, 2) }}% · 2日 {{ fmt(r.lhb.fwd && r.lhb.fwd.d2, 2) }}%
                   · 5日 {{ fmt(r.lhb.fwd && r.lhb.fwd.d5, 2) }}% · 10日 {{ fmt(r.lhb.fwd && r.lhb.fwd.d10, 2) }}%
+                </div>
+              </div>
+            </details>
+          </div>
+
+          <div v-if="r.holder && !r.holder.failed" class="pat-holder tiny">
+            <span class="hold-lead">资金性质</span>
+            <span v-for="(t, i) in r.holder.tags" :key="i" class="hold-tag">{{ t }}</span>
+            <span class="dim">· 报告期 {{ r.holder.date }}</span>
+            <details class="hold-det">
+              <summary>明细</summary>
+              <div class="hold-box">
+                <div class="hold-cap">十大流通股东口径（占流通股 %）</div>
+                <div v-for="(x, i) in holderCats(r.holder)" :key="i" class="hold-row">
+                  <span class="hold-cat">{{ x.cat }}</span>
+                  <span>{{ x.d.n }} 家 · {{ fmt(x.d.pct, 3) }}%</span>
+                  <span v-if="x.d.chg != null" :class="pctCls(x.d.chg)">{{ wan(x.d.chg) }}</span>
+                  <span v-if="x.d.new" class="hold-new">新进 {{ x.d.new }}</span>
+                  <span class="dim hold-names">{{ (x.d.top || []).join('、') }}</span>
+                </div>
+                <template v-if="holderOrg(r.holder).length">
+                  <div class="hold-cap">全体机构口径（比十大完整，二者不可相加）</div>
+                  <div v-for="(x, i) in holderOrg(r.holder)" :key="'o' + i" class="hold-row org">
+                    <span class="hold-cat">{{ x.cat }}</span>
+                    <span>{{ x.d.n == null ? '—' : x.d.n }} 家 · {{ fmt(x.d.pct, 3) }}%</span>
+                  </div>
+                </template>
+                <div v-if="r.holder.ctrl" class="hold-row">
+                  <span class="hold-cat">实际控制人</span><span>{{ r.holder.ctrl }}</span>
+                </div>
+                <div v-if="r.holder.hnum != null" class="hold-row">
+                  <span class="hold-cat">股东户数</span>
+                  <span>{{ r.holder.hnum.toLocaleString() }} 户</span>
+                  <span v-if="r.holder.hnum_chg != null" :class="pctCls(r.holder.hnum_chg)">
+                    {{ sign(r.holder.hnum_chg) }}{{ fmt(r.holder.hnum_chg, 1) }}%
+                  </span>
+                  <span class="dim">{{ r.holder.focus || '' }} {{ r.holder.hnum_date || '' }}</span>
+                </div>
+                <div v-if="r.holder.h_pct" class="hold-row dim">
+                  <span class="hold-cat">H 股（港交所名义持有）</span>
+                  <span>{{ fmt(r.holder.h_pct, 2) }}% · 非北向，仅备注</span>
+                </div>
+                <div v-if="(r.holder.recent || []).length" class="hold-cap">近期持股变动（临时公告口径，比季报新）</div>
+                <div v-for="(x, i) in r.holder.recent" :key="'r' + i" class="hold-row subtle">
+                  <span class="hold-cat">{{ x.d }}</span>
+                  <span class="dim hold-names">{{ x.name }}</span>
+                  <span :class="pctCls(x.chg)">{{ x.chg == null ? '—' : (x.chg > 0 ? '增持' : '减持') + (Math.abs(x.chg) / 1e4).toFixed(0) + '万股' }}</span>
+                  <span class="dim">{{ x.why }}</span>
+                </div>
+                <div class="hold-foot dim">
+                  季报口径，滞后最多 1 个季度 —— 描述「谁在持有」，不是「今天谁在买」；
+                  当日谁在买请看龙虎榜席位的「席位性质」。
+                </div>
+              </div>
+            </details>
+          </div>
+          <div v-else-if="holderMeta && !holderMeta.error" class="pat-holder tiny dim">
+            资金性质：无数据（未进入十大流通股东披露 / 接口未返回）
+          </div>
+
+          <div v-if="r.news && r.news.tag && r.news.tag !== '静默'" class="pat-holder tiny">
+            <span class="hold-lead">消息面</span>
+            <span class="hold-tag" :class="newsTagCls(r.news.tag)">{{ r.news.tag }}</span>
+            <span v-if="r.news.when" class="dim">{{ r.news.when }}</span>
+            <span v-if="r.news.why" class="dim">· {{ r.news.why }}</span>
+            <details v-if="(r.news.titles || []).length" class="hold-det">
+              <summary>相关消息 {{ r.news.titles.length }} 条</summary>
+              <div class="hold-box news-box">
+                <div v-for="(t, i) in r.news.titles" :key="'n' + i" class="news-line tiny dim">{{ t }}</div>
+                <div class="hold-foot dim">
+                  F10 资讯口径（公告 + 相关新闻），关键词定性宁缺勿滥；
+                  T 15:00 收盘后的消息不参与利好/题材定性（风险警示例外，宁可错杀）。
                 </div>
               </div>
             </details>
@@ -180,6 +294,16 @@ const staleCodes = computed(() => (pt.value && pt.value.stale_codes) || [])
             </div>
             <div class="pat-line2 tiny dim">
               收 {{ r.close }}（<span :class="pctCls(r.pct)">{{ sign(r.pct) }}{{ r.pct }}%</span>）· MA7 {{ r.ma7 }} · MA21 {{ r.ma21 }} · 粘合 {{ r.glue }}%
+            </div>
+            <div v-if="r.holder && r.holder.tags && r.holder.tags.length" class="pat-holder tiny dim">
+              <span class="hold-lead">资金性质</span>
+              <span v-for="(t, i) in r.holder.tags" :key="i" class="hold-tag sm">{{ t }}</span>
+            </div>
+            <div v-if="r.news && r.news.tag && r.news.tag !== '静默'" class="pat-holder tiny dim">
+              <span class="hold-lead">消息</span>
+              <span class="hold-tag sm" :class="newsTagCls(r.news.tag)">{{ r.news.tag }}</span>
+              <span v-if="r.news.when" class="dim">{{ r.news.when }}</span>
+              <span v-if="r.news.why" class="dim">· {{ r.news.why }}</span>
             </div>
             <div v-if="r.flow" class="pat-flow tiny dim">
               主力 <b :class="pctCls(r.flow.main_net)">{{ money(r.flow.main_net) }}</b>
@@ -208,6 +332,37 @@ const staleCodes = computed(() => (pt.value && pt.value.stale_codes) || [])
               按量比取前 {{ poolMeta.criteria.extra_max }} 只。
             </div>
             <div v-else>候选池：当日涨停 ∪ 核心池（历史快照无池子构成信息）。</div>
+            <template v-if="holderMeta">
+              <div>
+                <b>资金性质（季报底色）</b>：把十大流通股东按「公募 / 北向 / QFII / 社保 / 险资 /
+                私募 / 产业资本 / 国家队 / 牛散」九类归并（游资不在其中——季报披露不到，由龙虎榜席位回答）。
+                数据源为东财 F10 股东研究，<b>报告期滞后最多 1 个季度</b>：它说明<b>谁在持有</b>，
+                不说明<b>今天谁在买</b>。缓存 {{ holderMeta.cached_n }} 只 / 池 {{ holderMeta.ask_n }} 只
+                （季报换季才刷新，日内零开销）<template v-if="holderMeta.need_n">，本轮待补 {{ holderMeta.need_n }} 只</template>。
+                <template v-if="holderMeta.error">⚠ 本轮抓取异常：{{ holderMeta.error }}</template>
+              </div>
+              <div>
+                「十大流通股东口径」与「全体机构口径」<b>是两个不同分母，不能相加</b>：
+                前者只统计进入前十大的股东（门槛效应，会低估公募）；后者取自东财机构持仓汇总
+                （如茅台进十大的公募仅 1 家 0.365%，全体则有 1697 家合计 3.60%）。
+                其中 <b>H 股</b>（<code>香港中央结算(代理人)有限公司</code> / <code>HKSCC NOMINEES</code>）
+                单独列出并<b>不计入北向</b>——只有精确的 <code>香港中央结算有限公司</code> 才是沪深股通（北向）。
+              </div>
+              <div>
+                龙虎榜「<b>席位性质</b>」补上了 T+0 的"谁在买"：机构专用 / 沪深股通专用 / 游资营业部。
+                与季报底色叠加看更完整（例：底色"公募抱团" + 当日"机构专用净买"）。
+              </div>
+            </template>
+            <div v-if="newsMeta">
+              <b>消息面（上涨逻辑）</b>：对信号票抓 T-1 与 T 两天的东财 F10 资讯
+              （公告 + 相关新闻），按「<b>性质 × 时点</b>」定性——
+              利好·公告（业绩预增/中标/并购/回购等公司行为）＞ 题材·共振（行业或个股新闻）＞
+              资金·独行（窗口内无消息，最"干净"的技术突破）；<b>风险·警示</b>
+              （减持/澄清/问询/预亏等）优先级最高且<b>宁可错杀</b>。
+              时点取定性依据那条的挂网时间；T 15:00 收盘后的消息不参与利好/题材定性
+              （风险例外）。关键词定性会有误判，仅供参考，不构成依据。
+              <template v-if="newsMeta.error">⚠ 本轮抓取异常：{{ newsMeta.error }}</template>
+            </div>
             <div v-if="pt.latest_bar">
               <b>K线新鲜度</b>：池内最新 K 线日 <b>{{ pt.latest_bar }}</b>
               <template v-if="pt.latest_bar === pt.date">（= 快照日，正常）</template>
@@ -340,6 +495,73 @@ details.lhb-det summary { cursor: pointer; color: var(--t-3); font-size: 10px; }
   line-height: 1.7;
 }
 .lhb-box .seat { padding-left: 10px; color: var(--t-2); }
+/* 席位性质（T+0 的"谁在买"） */
+.seatkinds { margin-top: 2px; }
+.seatkind {
+  display: inline-block;
+  margin: 1px 4px 1px 0;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 10px;
+  color: var(--t-2);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--line);
+}
+.seatkind.inst { color: #8fc0ff; border-color: rgba(110, 168, 254, 0.45); background: rgba(110, 168, 254, 0.12); }
+.seatkind.north { color: #7ee0b8; border-color: rgba(62, 207, 142, 0.42); background: rgba(62, 207, 142, 0.12); }
+
+/* 资金性质（季报底色） */
+.pat-holder { margin-top: 3px; line-height: 1.7; }
+.hold-lead { font-weight: 600; color: var(--t-2); margin-right: 4px; }
+.hold-tag {
+  display: inline-block;
+  margin: 0 3px 0 0;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  color: var(--gold);
+  background: var(--gold-dim);
+  border: 1px solid rgba(233, 183, 92, 0.4);
+  white-space: nowrap;
+}
+.hold-tag.sm { opacity: 0.88; }
+/* 消息面定性：利好=涨红、风险=警示橙 */
+.hold-tag.good { color: #ff8f9d; background: rgba(255, 77, 94, 0.12); border-color: rgba(255, 77, 94, 0.45); }
+.hold-tag.risk { color: #ffd479; background: rgba(233, 183, 92, 0.12); border-color: rgba(233, 183, 92, 0.5); }
+.news-box { display: flex; flex-direction: column; gap: 2px; }
+.news-line { line-height: 1.6; }
+.news-risk-n { color: #ffd479; font-weight: 600; }
+details.hold-det { margin-top: 3px; }
+details.hold-det summary { cursor: pointer; color: var(--t-3); font-size: 10px; }
+.hold-box {
+  margin-top: 5px;
+  padding: 7px 9px;
+  border-radius: var(--r-sm);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--line);
+  line-height: 1.7;
+}
+.hold-cap {
+  margin-top: 5px;
+  padding-top: 5px;
+  color: var(--t-3);
+  font-size: 10px;
+  border-top: 1px dashed var(--line);
+}
+.hold-cap:first-child { margin-top: 0; padding-top: 0; border-top: none; }
+.hold-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: baseline; }
+.hold-row.org, .hold-row.subtle { opacity: 0.9; }
+.hold-cat { flex-shrink: 0; min-width: 80px; color: var(--t-1); font-weight: 600; }
+.hold-new {
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 10px;
+  color: #ffb27a;
+  background: rgba(255, 150, 80, 0.12);
+  border: 1px solid rgba(255, 150, 80, 0.35);
+}
+.hold-names { flex: 1 1 auto; min-width: 0; }
+.hold-foot { margin-top: 6px; padding-top: 5px; border-top: 1px dashed var(--line); line-height: 1.6; }
 .up { color: #ff5d6c; }
 .down { color: #3ecf8e; }
 details.pat-meta { margin-top: 10px; }

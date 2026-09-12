@@ -270,12 +270,18 @@ def _enrich_cores(cores: list[dict], hist_cores: list | None = None) -> list[dic
 def build_snapshot(date: str | None = None, with_cores: bool = True,
                    hist_heats: list | None = None,
                    hist_cores: list | None = None,
-                   flow_agg: dict | None = None) -> dict:
+                   flow_agg: dict | None = None,
+                   holder_map: dict | None = None,
+                   holder_refresh_all: bool = False) -> dict:
     """生成当日完整分析快照。
 
     flow_agg: 资金流自累积表（``flow_hist`` 集合读出，形如
     ``{code: [{"d": "YYYY-MM-DD", "m": 主力净额(元)}, ...]}``），
     供形态模块算"近 3/5 日累计主力净额 + 连续净流入天数"；缺省时降级新浪口径。
+
+    holder_map: 资金性质底色缓存（``holder_cache`` 集合读出，``{code: rec}``，
+    季报口径）。形态模块只对"缓存缺失 / 报告期过期"的票补抓，新记录随
+    ``snap["pattern"]["holder_rows"]`` 返回，由调用方写回。
     """
     if date is None:
         dates = _trade_dates(6)
@@ -509,7 +515,9 @@ def build_snapshot(date: str | None = None, with_cores: bool = True,
         pat = None
         if is_latest:
             _items, _pmeta = build_pattern_pool(zt_rows=zt_today, core_rows=cores)
-            pat = scan_pattern(_items, date=today, flow_agg=flow_agg, pool_meta=_pmeta)
+            pat = scan_pattern(_items, date=today, flow_agg=flow_agg, pool_meta=_pmeta,
+                               holder_map=holder_map,
+                               holder_refresh_all=holder_refresh_all)
             # 不再把 pat["date"] 覆写成 today：scan_pattern 已回传真实 bar 日期与
             # latest_bar / fresh / stale_n，覆写会掩盖"K线未更新"这一事实（P3）。
             if not pat.get("date"):

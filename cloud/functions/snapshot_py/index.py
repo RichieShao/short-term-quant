@@ -269,7 +269,9 @@ def main(event, context):
         items, pmeta = build_pattern_pool(zt_rows=zt, core_rows=event.get("cores") or [])
         try:
             pat = scan_pattern(items, date=d, flow_agg=event.get("flow_agg"),
-                               pool_meta=pmeta)
+                               pool_meta=pmeta,
+                               holder_map=event.get("holder_map"),
+                               holder_refresh_all=bool(event.get("holder_refresh_all")))
         except Exception as e:
             import traceback
             return {"ok": False, "error": f"scan_pattern fail: {type(e).__name__}: {e}",
@@ -335,6 +337,79 @@ def main(event, context):
                           "trace": traceback.format_exc()[-600:]}
         return out
 
+    # 资金性质底色分批同步（供 daily_job 在发现 holder_cache 缺口后调用）。
+    # ⚠ 为什么必须**单独**做成一个 action（2026-09-12 踩坑）：
+    #   一条资金性质记录约 1KB，190 只 ≈180KB。若跟着 pattern 的返回一起回传，
+    #   会撞上"嵌套 callFunction 响应体过大被平台截断"——实测 Python 侧返回 179 条，
+    #   Node 侧只收到 10 条，且**不报错**（静默丢数据）。故改成分批（每批 40 只 ≈40KB）。
+    if event.get("action") == "holder_sync":
+        from quant.data.holders import pick_refresh, query_holders
+        codes = [str(c) for c in (event.get("codes") or []) if c]
+        if not codes:
+            return {"ok": False, "error": "缺少 codes"}
+        d = str(event.get("date") or today_cn)
+        todo = codes
+        if not event.get("force"):
+            try:
+                todo = pick_refresh(codes, event.get("holder_map") or {}, d)
+            except Exception:
+                todo = codes
+        if not todo:
+            return {"ok": True, "n": 0, "ask_n": len(codes), "skipped": "fresh",
+                    "holder_rows": []}
+        try:
+            recs = query_holders(todo, today=d)
+        except Exception as e:
+            import traceback
+            return {"ok": False, "error": f"{type(e).__name__}: {e}",
+                    "trace": traceback.format_exc()[-600:]}
+        return {"ok": True, "ask_n": len(codes), "n": len(recs),
+                "holder_rows": sorted(recs.values(), key=lambda r: r.get("code") or "")}
+
+    # 诊断：消息面定性（F10 资讯 gsgg+gszx）——验证抓取、时点判定与 4+1 定性。
+    if event.get("action") == "news_diag":
+        from quant.data.news import classify_batch, fetch_one
+        codes = [str(c) for c in (event.get("codes") or ["sh600410", "sz002139"])]
+        date = str(event.get("date") or today_cn)
+        prev = str(event.get("prev_date") or "")
+        out = {"ok": True, "date": date, "prev_date": prev}
+        anns, news = fetch_one(codes[0])
+        out["raw"] = {
+            "ann_n": len(anns or []), "news_n": len(news or []),
+            "ann_head": [a.get("title") for a in (anns or [])[:3]],
+            "news_head": [n.get("title") for n in (news or [])[:3]],
+        }
+        try:
+            out["recs"] = classify_batch(codes, date, prev, detail_codes=codes)
+        except Exception as e:
+            import traceback
+            out["error"] = f"{type(e).__name__}: {e}"
+            out["trace"] = traceback.format_exc()[-600:]
+        return out
+
+    # 诊断：资金性质底色（东财 F10 股东研究）——在云端验证分类口径与可达性。
+    # 本机沙箱对 emweb.securities.eastmoney.com 返回 200/0 字节（防火墙伪造），
+    # 故只能在云端函数内验收。
+    if event.get("action") == "diag_holder":
+        from quant.data.holders import expected_report, query_holders, seat_kind
+        codes = [str(c) for c in (event.get("codes")
+                                  or ["sh600519", "sz300750", "sh601012", "sz002594"])]
+        out = {"ok": True, "now_cn": today_cn,
+               "expected_report": expected_report(today_cn),
+               "seat_kind_samples": {n: seat_kind(n) for n in (
+                   "机构专用", "沪股通专用", "深股通专用",
+                   "华鑫证券股份有限公司上海分公司", "")}}
+        try:
+            recs = query_holders(codes)
+            out["hit_n"] = len(recs)
+            out["ask_n"] = len(codes)
+            out["holders"] = recs
+        except Exception as e:
+            import traceback
+            out["error"] = f"{type(e).__name__}: {e}"
+            out["trace"] = traceback.format_exc()[-600:]
+        return out
+
     if mode == "auto":
         ok, last = is_trade_day(today_cn)
         if not ok:
@@ -345,7 +420,9 @@ def main(event, context):
         snap = build_snapshot(date, with_cores=with_cores,
                               hist_heats=event.get("hist_heats"),
                               hist_cores=event.get("hist_cores"),
-                              flow_agg=event.get("flow_agg"))
+                              flow_agg=event.get("flow_agg"),
+                              holder_map=event.get("holder_map"),
+                              holder_refresh_all=bool(event.get("holder_refresh_all")))
     except Exception as e:
         import traceback
         return {"ok": False, "error": f"{type(e).__name__}: {e}",

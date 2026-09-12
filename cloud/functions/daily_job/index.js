@@ -100,8 +100,123 @@ async function saveFlowRows(date, rows, maxTry = 2) {
   return { ok: ok > 0, n: ok, total: list.length }
 }
 
+/**
+ * 资金性质底色缓存（holder_cache，_id = code）读取 → 注入 snapshot_py 的 holder_map。
+ *
+ * 数据是**季报口径**（东财 F10 十大流通股东分类：公募/北向/QFII/社保/险资/私募/
+ * 产业资本/国家队/牛散），日内不变 ⇒ 不该每天重拉。刷新决策在 Python 侧
+ * （`holders.need_refresh`：报告期已过期 且 距上次抓取 ≥7 天），本函数只负责整包传下去。
+ *
+ * 池约 190 只 → 缓存 190 条，limit(400) 一次取全（约 300KB）。
+ * 失败返回 null：形态照跑，只是没有底色（不阻断主流程）。
+ */
+async function loadHolderCache(maxDocs = 400) {
+  try {
+    try { await db.createCollection('holder_cache') } catch (e) { /* 已存在 */ }
+    const r = await db.collection('holder_cache').limit(maxDocs).get()
+    const out = {}
+    for (const d of r.data || []) {
+      const c = d.code || d._id
+      if (c) out[c] = d
+    }
+    return Object.keys(out).length ? out : null
+  } catch (e) {
+    console.error('[daily_job] holder_cache 读取失败（资金性质底色缺失）:', e.message)
+    return null
+  }
+}
+
+/**
+ * 写资金性质底色（holder_cache，_id = code，幂等 upsert）。
+ * 只写"本次新抓到的票"（缓存命中的不重写），故日常通常 no-rows。
+ */
+async function saveHolderRows(rows, maxTry = 2) {
+  const list = (rows || []).filter((r) => r && r.code)
+  if (!list.length) return { ok: false, skipped: 'no-rows' }
+  try { await db.createCollection('holder_cache') } catch (e) { /* 已存在 */ }
+  let ok = 0
+  for (let i = 0; i < list.length; i += 20) {
+    const chunk = list.slice(i, i + 20)
+    try {
+      await Promise.all(chunk.map((r) => {
+        const doc = Object.assign({}, r)
+        delete doc._id
+        doc.updated_at = Date.now()
+        return db.collection('holder_cache').doc(String(r.code)).set(doc)
+      }))
+      ok += chunk.length
+    } catch (e) {
+      console.error(`[daily_job] holder_cache 写入失败（批次 ${i / 20}）: ${e.message}`)
+      if (i === 0) await sleep(1500)
+    }
+  }
+  return { ok: ok > 0, n: ok, total: list.length }
+}
+
+/**
+ * 分批同步资金性质底色（snapshot_py action=holder_sync）。
+ *
+ * ⚠ 必须分批（2026-09-12 踩坑）：一条记录约 1KB，190 只 ≈180KB，直接整包回传会撞上
+ *   "嵌套 callFunction 响应体过大被平台截断"——Python 返回 179 条、Node 只收到 10 条，
+ *   而且**不报错**。分 40 只/批（≈40KB）后稳定完整。
+ *
+ * 返回 ``{ok, n, ask_n, rows}``；单批失败只丢该批，不阻断。
+ */
+async function syncHolders(codes, date, holderMap, force, batch = 40) {
+  const uniq = [...new Set((codes || []).filter(Boolean))]
+  if (!uniq.length) return { ok: false, skipped: 'no-need', n: 0, rows: [] }
+  const rows = []
+  for (let i = 0; i < uniq.length; i += batch) {
+    const chunk = uniq.slice(i, i + batch)
+    try {
+      const out = await app.callFunction({
+        name: 'snapshot_py',
+        data: { action: 'holder_sync', codes: chunk, date, holder_map: holderMap, force: !!force },
+      }, { timeout: 60000 })
+      const r = out && out.result
+      if (r && r.ok && Array.isArray(r.holder_rows)) {
+        rows.push(...r.holder_rows)
+        console.log(`[daily_job] holder_sync 第 ${i / batch + 1} 批: ${r.holder_rows.length}/${chunk.length}`)
+      } else {
+        console.error(`[daily_job] holder_sync 第 ${i / batch + 1} 批失败: ${(r && r.error) || '无返回'}`)
+      }
+    } catch (e) {
+      console.error(`[daily_job] holder_sync 第 ${i / batch + 1} 批异常: ${e.message}`)
+    }
+  }
+  return { ok: rows.length > 0, n: rows.length, ask_n: uniq.length, rows }
+}
+
+/**
+ * 资金性质缺口自愈：若 pattern.holder_meta.need 非空（冷启动 / 季报换季），
+ * 分批抓取 → 写库 → 用"缓存 + 新记录"重算一次形态，使**当次快照就带上底色**。
+ * 日常 need 为空 → 零额外开销、零额外请求。
+ *
+ * ``rerun(cache)`` 由调用方提供（夜间路径重跑 pattern_only；盘后路径只重算形态块）。
+ */
+async function fillHolders(pat, holderCache, rerun) {
+  const need = (pat && pat.holder_meta && pat.holder_meta.need) || []
+  if (!need.length) return { pat, write: { ok: false, skipped: 'no-need' } }
+  const sync = await syncHolders(need, null, holderCache, false)
+  if (!sync.rows.length) {
+    // 抓取全失败（东财 F10 抖动）→ 保留原 pat，不阻断主流程
+    return { pat, write: { ok: false, skipped: 'sync-empty' }, sync_n: 0, need_n: need.length }
+  }
+  const write = await saveHolderRows(sync.rows)
+  const cache = Object.assign({}, holderCache || {})
+  for (const r of sync.rows) cache[r.code] = r
+  let pat2 = pat
+  try {
+    pat2 = (await rerun(cache)) || pat
+  } catch (e) {
+    console.error('[daily_job] 资金性质重算失败（保留无底色版本）:', e.message)
+  }
+  return { pat: pat2, write, sync_n: sync.rows.length, need_n: need.length }
+}
+
 /** 调 snapshot_py 算快照；数据源瞬时抖动时重试（非交易日 skip 不重试）。 */
-async function computeSnapshot(event, maxTry = 3) {  let lastErr = null
+async function computeSnapshot(event, maxTry = 3) {
+  let lastErr = null
   for (let i = 1; i <= maxTry; i++) {
     try {
       const res = await app.callFunction({
@@ -115,6 +230,13 @@ async function computeSnapshot(event, maxTry = 3) {  let lastErr = null
           // 核心池：待回填的昨日记录 + 近 N 日在池 code 集合
           prev_cores: event.prev_cores,
           hist_cores: event.hist_cores,
+          // 资金流自累积（近 N 日主力净额）→ 形态模块算近3/5日累计 + 连续净流入天数
+          // ⚠ 2026-09-12 修复：run() 一直在读 flow_agg 并挂到 event，但此前**没有
+          //   往下传**，导致盘后主快照的多日资金流被静默丢弃（只有 21:00 的
+          //   pattern_only 用上了），同一只票 16:40 与 21:00 的资金分口径不一致。
+          flow_agg: event.flow_agg,
+          // 资金性质底色缓存（季报口径，日内不变）——Python 侧只补缺失/过期的票
+          holder_map: event.holder_map,
         },
       }, { timeout: 110000 }) // SDK 默认 15s；涨停爆发日快照约 20-45s，再叠加形态的资金流/龙虎榜拉取，必须放宽
 
@@ -433,28 +555,42 @@ async function runNight(event) {
 
   const cores = (day.cores || []).map((c) => ({ code: c.code, name: c.name, board: c.board }))
   const flowAgg = await loadFlowAgg()
+  const holderCache = await loadHolderCache()
 
-  let res = null
-  let lastErr = 'pattern_only 无返回'
-  for (let i = 1; i <= 3; i++) {
-    try {
-      const out = await app.callFunction({
-        name: 'snapshot_py',
-        data: { action: 'pattern_only', date, cores, flow_agg: flowAgg },
-      }, { timeout: 110000 }) // 形态+资金流+龙虎榜实测 15s（冷启动走新浪兜底时更久），SDK 默认 15s 必超时
-      res = out && out.result
-      if (res && res.ok) break
-      lastErr = (res && res.error) || 'pattern_only 失败'
-    } catch (e) {
-      lastErr = `callFunction 失败: ${e.message}`
+  // 重算形态（可带不同 holder_map）；抽成闭包供"缺口自愈"复跑一次
+  const callPattern = async (holderMap) => {
+    let lastErr = 'pattern_only 无返回'
+    for (let i = 1; i <= 3; i++) {
+      try {
+        const out = await app.callFunction({
+          name: 'snapshot_py',
+          data: {
+            action: 'pattern_only', date, cores, flow_agg: flowAgg,
+            holder_map: holderMap,
+            // 显式全量刷新（补灌/季报换季时用），日常不传
+            holder_refresh_all: !!event.holder_refresh_all,
+          },
+        }, { timeout: 110000 }) // 形态+资金流+龙虎榜实测 15~25s（冷启动走新浪兜底时更久），SDK 默认 15s 必超时
+        const res = out && out.result
+        if (res && res.ok) return res
+        lastErr = (res && res.error) || 'pattern_only 失败'
+      } catch (e) {
+        lastErr = `callFunction 失败: ${e.message}`
+      }
+      console.error(`[daily_job] 夜间补充第 ${i}/3 次失败: ${lastErr}`)
+      if (i < 3) await sleep(3000 * i)
     }
-    console.error(`[daily_job] 夜间补充第 ${i}/3 次失败: ${lastErr}`)
-    if (i < 3) await sleep(3000 * i)
+    return null
   }
-  if (!res || !res.ok) return { ok: false, error: lastErr, date }
 
-  const pat = res.pattern
-  const flowWrite = await saveFlowRows(date, pat.flow_rows)
+  const res = await callPattern(holderCache)
+  if (!res) return { ok: false, error: 'pattern_only 三次均失败', date }
+
+  const flowWrite = await saveFlowRows(date, res.pattern.flow_rows)
+  // 资金性质缺口自愈：冷启动/季报换季时先分批抓取写库，再用完整缓存重算一次
+  const hf = await fillHolders(res.pattern, holderCache,
+    (cache) => callPattern(cache).then((x) => (x && x.pattern) || null))
+  const pat = hf.pat
   // 合并回写：保留既有全部字段，只换 pattern。
   // ⚠️ daily 文档就是"扁平快照本体"（saveSnapshot 直接 set(snap)，api 直接把它当 snapshot 返回），
   //    所以 pattern 在**顶层**，不是 doc.snapshot.pattern。
@@ -475,7 +611,11 @@ async function runNight(event) {
     lhb_today: (pat.lhb_meta || {}).today, lhb_today_n: (pat.lhb_meta || {}).today_n,
     flow_srcs: (pat.flow_meta || {}).srcs, flow_rows: (pat.flow_rows || []).length,
     flow_agg_codes: flowAgg ? Object.keys(flowAgg).length : 0,
-    flow_write: flowWrite, costMs: Date.now() - t0,
+    flow_write: flowWrite,
+    holder_meta: pat.holder_meta, holder_write: hf.write,
+    holder_sync_n: hf.sync_n || 0, holder_need_n: hf.need_n || 0,
+    news_meta: pat.news_meta,
+    costMs: Date.now() - t0,
   }
 }
 
@@ -499,11 +639,33 @@ async function run(event = {}) {
   // 资金流自累积：近 N 日样本注入形态模块（算近3/5日累计 + 连续净流入天数）
   const flowAgg = await loadFlowAgg()
   if (flowAgg) event.flow_agg = flowAgg
+  // 资金性质底色缓存（季报口径）：整包注入，Python 侧按需补拉缺失/过期的票
+  const holderCache = await loadHolderCache()
+  if (holderCache) event.holder_map = holderCache
 
   const r = await computeSnapshot(event)
   if (!r || !r.ok) return r || { ok: false, error: 'snapshot_py 无返回' } // skipped / error 原样透传
 
   const snap = r.snapshot
+  // 资金性质缺口自愈（冷启动 / 季报换季）：分批抓取写库 → 用完整缓存**只重算形态块**
+  // （不重跑整个快照）。日常 need 为空 → 直接跳过，零额外开销。
+  const coresForPat = (snap.cores || []).map((c) => ({ code: c.code, name: c.name, board: c.board }))
+  const hf = await fillHolders(snap.pattern, holderCache, async (cache) => {
+    if (!snap.pattern) return null
+    try {
+      const out = await app.callFunction({
+        name: 'snapshot_py',
+        data: { action: 'pattern_only', date: r.date, cores: coresForPat,
+                flow_agg: flowAgg, holder_map: cache },
+      }, { timeout: 110000 })
+      const r2 = out && out.result
+      return (r2 && r2.ok && r2.pattern) || null
+    } catch (e) {
+      console.error('[daily_job] 形态块重算失败（保留无底色版本）:', e.message)
+      return null
+    }
+  })
+  snap.pattern = hf.pat
   snap._updatedAt = Date.now()
   const err = await saveSnapshot(r.date, snap)
   if (err) return { ok: false, error: `写库失败: ${err}`, date: r.date }
@@ -526,9 +688,11 @@ async function run(event = {}) {
       hit_n: snap.pattern.hit_n, watch_n: snap.pattern.watch_n,
       flow_srcs: (snap.pattern.flow_meta || {}).srcs,
       lhb_today_n: (snap.pattern.lhb_meta || {}).today_n,
+      holder_meta: snap.pattern.holder_meta,
     } : null,
     flow_agg_codes: flowAgg ? Object.keys(flowAgg).length : 0,
     flow_write: flowWrite,
+    holder_write: hf.write, holder_sync_n: hf.sync_n || 0, holder_need_n: hf.need_n || 0,
     themelife: tl,
     calib,
     core_track: ct,

@@ -53,6 +53,24 @@ const money = (v) => {
   if (a >= 1e4) return sg + (a / 1e4).toFixed(0) + '万'
   return sg + a.toFixed(0)
 }
+// 资金性质（季报底色）：与 Pattern.vue 的 <script setup> 保持同步
+const HOLDER_ORDER = ['国家队', '社保基金', 'QFII', '险资', '公募基金', '私募',
+  '北向资金', '产业资本', '牛散']
+const holderCats = (h) => (h && h.cats
+  ? HOLDER_ORDER.filter((c) => h.cats[c]).map((c) => ({ cat: c, d: h.cats[c] }))
+  : [])
+const holderOrg = (h) => (h && h.org
+  ? HOLDER_ORDER.filter((c) => h.org[c]).map((c) => ({ cat: c, d: h.org[c] }))
+  : [])
+const SEAT_ORDER = ['机构专用', '北向专用', '游资营业部']
+const seatKinds = (lhb) => {
+  const k = (lhb && lhb.kinds) || {}
+  return SEAT_ORDER.filter((x) => k[x]).map((x) => ({ kind: x, d: k[x] }))
+}
+const wan = (v) => (v == null ? '—' : (v > 0 ? '+' : '') + Number(v).toFixed(0) + '万股')
+// 消息面定性（上涨逻辑）：与 Pattern.vue 保持同步
+const newsTagCls = (tag) => (tag === '风险·警示' ? 'risk'
+  : tag === '利好·公告' ? 'good' : '')
 function makeApp(S) {
   const pt = S.pattern
   return createSSRApp({
@@ -76,6 +94,9 @@ function makeApp(S) {
         flowMeta: (pt && pt.flow_meta) || null,
         poolMeta: (pt && pt.pool_meta) || null,
         staleCodes: (pt && pt.stale_codes) || [],
+        holderMeta: (pt && pt.holder_meta) || null,
+        newsMeta: (pt && pt.news_meta) || null,
+        holderCats, holderOrg, seatKinds, wan, newsTagCls,
       }
     },
   })
@@ -173,6 +194,105 @@ if (S6.pattern && S6.pattern.flow_meta) {
 const html6 = await renderToString(makeApp(S6))
 chk('新浪限流提示', html6, '触发反爬限流')
 chk('资金分项数标记', html6, '·1项<')
+
+// 分支⑦：资金性质底色（季报）+ 席位性质（T+0）—— 注入确定性数据，验证渲染契约
+const S7 = JSON.parse(JSON.stringify(S))
+const h0 = S7.pattern && (S7.pattern.hits || [])[0]
+if (h0) {
+  S7.pattern.holder_meta = { ask_n: 190, cached_n: 190, need_n: 0, need: [] }
+  h0.holder = {
+    date: '2026-06-30', ctrl: '李振国,李喜燕', hnum: 848658, hnum_chg: -0.8,
+    focus: '非常分散', hnum_date: '2026-08-31', h_pct: 0,
+    tags: ['社保持仓', '北向重仓', '公募抱团'],
+    cats: {
+      社保基金: { n: 1, pct: 0.45, chg: -636.6, new: 0, top: ['全国社保基金一一八组合'] },
+      北向资金: { n: 1, pct: 3.51, chg: 915.5, new: 0, top: ['香港中央结算有限公司'] },
+      公募基金: { n: 2, pct: 0.881, chg: null, new: 1, top: ['华泰柏瑞中证光伏产业ETF'] },
+    },
+    org: { 公募基金: { n: 549, pct: 5.363 }, 社保基金: { n: 1, pct: 0.45 } },
+    recent: [{ d: '2026-08-05', name: '香港中央结算有限公司', chg: -6920580, pct: 18.9, why: '临时公告' }],
+  }
+  // 席位性质：覆盖三种性质中的两种，断言渲染与文案
+  h0.lhb = Object.assign({}, h0.lhb || {}, {
+    on: true, date: S.date, tags: [], reasons: [], fwd: {},
+    seats_buy: [], seats_sell: [],
+    kinds: {
+      机构专用: { n: 2, buy: 1.2e8, sell: 0, net: 1.2e8, seats: ['机构专用'] },
+      游资营业部: { n: 1, buy: 5e7, sell: 0, net: 5e7, seats: ['华鑫证券上海分公司'] },
+    },
+  })
+}
+const html7 = await renderToString(makeApp(S7))
+if (h0) {
+  chk('资金性质统计条', html7, '资金性质 190/190')
+  chk('资金性质底色标签', html7, '公募抱团')
+  chk('十大流通股东口径', html7, '十大流通股东口径')
+  chk('分类行·社保', html7, '全国社保基金一一八组合')
+  chk('分类行·减持万股', html7, '-637万股')
+  chk('新进标记', html7, '新进 1')
+  chk('全体机构口径', html7, '全体机构口径')
+  chk('实控人行', html7, '实际控制人')
+  chk('股东户数行', html7, '股东户数')
+  chk('近期持股变动', html7, '近期持股变动')
+  chk('季报口径声明', html7, '滞后最多 1 个季度')
+  chk('口径块·资金性质', html7, '资金性质（季报底色）')
+  chk('口径块·H股陷阱', html7, '不计入北向')
+  chk('席位性质', html7, '席位性质')
+  chk('机构专用席位', html7, '机构专用 2 席')
+  chk('游资营业部席位', html7, '游资营业部 1 席')
+}
+
+// 分支⑦b：failed 占位记录（北交所等无 F10 数据）→ 不渲染明细块、落到"无数据"兜底
+const S7b = JSON.parse(JSON.stringify(S))
+const h1 = S7b.pattern && (S7b.pattern.hits || [])[1]
+if (h1 && h0) {
+  S7b.pattern.holder_meta = { ask_n: 190, cached_n: 189, need_n: 0, need: [] }
+  h1.holder = { code: h1.code, failed: 1, fetched: S.date }
+}
+const html7b = await renderToString(makeApp(S7b))
+if (h1 && h0) {
+  chk('failed 占位不崩', html7b, '双线粘合突破')
+  chk('failed 占位落到无数据兜底', html7b, '资金性质：无数据')
+}
+
+// 分支⑨：消息面定性（上涨逻辑）—— 统计条/突破卡明细/粘合卡标签/口径块/静默不渲染
+const S9 = JSON.parse(JSON.stringify(S))
+if (S9.pattern) {
+  S9.pattern.news_meta = { ask_n: 75, ok_n: 74, dist: { '题材·共振': 52, '资金·独行': 16, '利好·公告': 4, '风险·警示': 2 } }
+  const h0n = (S9.pattern.hits || [])[0]
+  if (h0n) h0n.news = {
+    tag: '利好·公告', when: 'T-1盘后', why: '华胜天成:签订重大合同公告', n: 5,
+    titles: ['华胜天成:签订重大合同公告', '华胜天成等成立数智科技公司 含AI业务'],
+  }
+  const h1n = (S9.pattern.hits || [])[1]
+  if (h1n) h1n.news = { tag: '风险·警示', when: 'T盘后', why: '关于控股股东减持计划的预披露公告', n: 3 }
+  const w0 = (S9.pattern.watch || [])[0]
+  if (w0) w0.news = { tag: '题材·共振', when: 'T盘中', why: 'CPO概念股震荡回升', n: 4 }
+  const h2n = (S9.pattern.hits || [])[2]
+  if (h2n) h2n.news = { tag: '静默' }
+}
+const html9 = await renderToString(makeApp(S9))
+chk('消息面统计条', html9, '消息面 74/75')
+chk('消息面风险计数', html9, '⚠2')
+chk('突破卡·消息面块', html9, '利好·公告')
+chk('突破卡·时点', html9, 'T-1盘后')
+chk('突破卡·明细标题', html9, '相关消息 2 条')
+chk('突破卡·风险时点', html9, 'T盘后')
+chk('粘合卡·消息标签', html9, '题材·共振')
+chk('口径块·消息面', html9, '消息面（上涨逻辑）')
+chk('口径块·宁可错杀', html9, '宁可错杀')
+chk('静默不渲染', html9, '静默', false)
+
+// 分支⑧：无资金性质数据 → 不崩、且不渲染任何资金性质标签/说明
+const S8 = JSON.parse(JSON.stringify(S))
+if (S8.pattern) {
+  S8.pattern.holder_meta = null
+  for (const r of S8.pattern.hits || []) r.holder = null
+  for (const r of S8.pattern.watch || []) r.holder = null
+}
+const html8 = await renderToString(makeApp(S8))
+chk('无资金性质不崩', html8, '双线粘合突破')
+chk('无资金性质时不渲染说明', html8, '季报底色', false)
 
 console.log(bad === 0 ? '\n全部通过' : `\n${bad} 项未通过`)
 process.exit(bad === 0 ? 0 : 1)
